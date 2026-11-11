@@ -1,9 +1,10 @@
 package com.nhannv.p2p.ui;
 
+import com.nhannv.p2p.MainApplication;
 import com.nhannv.p2p.model.Peer;
 import com.nhannv.p2p.model.SharedFile;
 import com.nhannv.p2p.network.DiscoveryService;
-import com.nhannv.p2p.network.FileDownloadTask;
+import com.nhannv.p2p.network.DownloadManager;
 import com.nhannv.p2p.network.FileSenderTask;
 import com.nhannv.p2p.network.P2PServer;
 import com.nhannv.p2p.network.PeerDiscoveryListener;
@@ -23,6 +24,7 @@ import javafx.scene.control.ListView;
 import javafx.scene.control.ProgressBar;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
+import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.FileChooser;
@@ -31,6 +33,8 @@ import javafx.stage.Window;
 import java.io.File;
 import java.io.IOException;
 import java.net.BindException;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -38,31 +42,31 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * Controller trung tâm của {@code MainView.fxml} (Milestone 3).
+ * Controller trung tâm của {@code MainView.fxml} (Milestone 4 - Final Technical Milestone).
  *
- * <h2>Kiến trúc & Luồng hoạt động cho team (Huỳnh Nhân Danh)</h2>
+ * <h2>Các tính năng nổi bật (Thuyết trình & Vấn đáp đồ án)</h2>
  * <ul>
- *   <li><b>Quản lý Shared Folder ({@link SharedFolderManager}):</b>
- *       Quét các tệp trong thư mục chia sẻ và tính SHA-256 trên luồng nền.</li>
- *   <li><b>Giao thức TCP Đa Lệnh ({@link P2PServer}):</b>
- *       Lắng nghe đồng thời 3 lệnh {@code LIST_FILES}, {@code DOWNLOAD_FILE}, {@code PUSH_FILE}
- *       trên cổng TCP 8889 bằng {@code ExecutorService} (Thread Pool).</li>
- *   <li><b>Tìm kiếm & Gom danh sách tệp ({@code LIST_FILES}):</b>
- *       Khi người dùng bấm vào một Peer ở cột trái hoặc bấm "Làm mới danh sách tệp", ứng dụng
- *       gửi lệnh {@code LIST_FILES} tới các Peer trên luồng nền, gom toàn bộ {@link SharedFile}
- *       về {@code masterFileList} và lọc tức thời qua {@link FilteredList} khi gõ ô tìm kiếm.</li>
- *   <li><b>Tải tệp & Xác thực On-the-fly SHA-256 ({@link FileDownloadTask}):</b>
- *       Khi chọn 1 tệp trên bảng và bấm "Tải tệp đã chọn", {@code FileDownloadTask} tải từng chunk 64KB,
- *       đo tốc độ MB/s thời gian thực, vừa ghi đĩa vừa băm SHA-256 ngay trên luồng byte và đối chiếu
- *       với mã SHA-256 gốc khi đạt 100%.</li>
+ *   <li><b>Gộp nguồn Swarm theo SHA-256:</b>
+ *       Các tệp có cùng mã {@code sha256Hash} từ nhiều Peer được gộp thông minh trên {@code TableView}
+ *       và hiển thị số lượng nguồn ở cột <b>"Số nguồn (Peers)"</b> (vd: {@code "2 Peers (Swarm)"}).</li>
+ *   <li><b>Điều khiển Pause / Resume / Cancel:</b>
+ *       Kết nối trực tiếp với {@link DownloadManager} để tạm dừng, tiếp tục tải từ chính xác byte offset
+ *       của tệp {@code .part}, hoặc hủy và dọn dẹp tệp tạm.</li>
+ *   <li><b>Nhật ký sự kiện mạng thời gian thực ({@code networkLogArea}):</b>
+ *       Ghi lại chi tiết từng mốc thời gian {@code [HH:mm:ss]} của mọi sự kiện UDP Discovery,
+ *       Offset Resume, phân đoạn Swarm và xác thực SHA-256.</li>
  * </ul>
  */
 public class MainController implements PeerDiscoveryListener {
 
     private static final String STATUS_PREFIX = "Trạng thái: ";
+    private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss");
 
     @FXML
     private Label sharedFolderLabel;
+
+    @FXML
+    private Button themeToggleButton;
 
     @FXML
     private ListView<Peer> peerListView;
@@ -89,13 +93,28 @@ public class MainController implements PeerDiscoveryListener {
     private TableColumn<SharedFile, String> fileSizeColumn;
 
     @FXML
+    private TableColumn<SharedFile, String> fileSourcesColumn;
+
+    @FXML
     private TableColumn<SharedFile, String> fileOwnerColumn;
 
     @FXML
     private TableColumn<SharedFile, String> fileHashColumn;
 
     @FXML
+    private TextArea networkLogArea;
+
+    @FXML
     private Button downloadSelectedButton;
+
+    @FXML
+    private Button pauseButton;
+
+    @FXML
+    private Button resumeButton;
+
+    @FXML
+    private Button cancelButton;
 
     @FXML
     private Button chooseFileButton;
@@ -109,13 +128,17 @@ public class MainController implements PeerDiscoveryListener {
     /** Danh sách Peer đang online trong LAN. */
     private final ObservableList<Peer> peerList = FXCollections.observableArrayList();
 
-    /** Danh sách gốc chứa toàn bộ tệp chia sẻ (của máy mình + của các Peer trong LAN). */
+    /** Danh sách tệp thô (chưa gộp) từ máy cục bộ và các Peer. */
+    private final List<SharedFile> rawFileEntries = new ArrayList<>();
+
+    /** Danh sách tệp đã gộp theo mã SHA-256 để hiển thị lên TableView. */
     private final ObservableList<SharedFile> masterFileList = FXCollections.observableArrayList();
 
     /** Danh sách bọc quanh masterFileList để lọc theo ô tìm kiếm tức thời. */
     private FilteredList<SharedFile> filteredFileList;
 
     private final SharedFolderManager sharedFolderManager = new SharedFolderManager();
+    private final DownloadManager downloadManager = new DownloadManager(this::appendNetworkLog);
     private DiscoveryService discoveryService;
     private P2PServer p2pServer;
 
@@ -126,16 +149,16 @@ public class MainController implements PeerDiscoveryListener {
         peerListView.setPlaceholder(new Label("Đang tìm Peer trong mạng LAN..."));
         peerCountLabel.textProperty().bind(Bindings.size(peerList).asString("(%d)"));
 
-        // Khi người dùng click chọn một Peer bên trái -> tự động gửi LIST_FILES lấy danh sách tệp.
         peerListView.getSelectionModel().selectedItemProperty().addListener((obs, oldPeer, selectedPeer) -> {
             if (selectedPeer != null) {
                 fetchFilesFromPeersAsync(List.of(selectedPeer));
             }
         });
 
-        // --- 2. Vùng giữa: Bảng 4 cột (Tên tệp, Dung lượng, Máy sở hữu, Mã SHA-256) + Tìm kiếm ---
+        // --- 2. Vùng giữa: Bảng 5 cột (Tên tệp, Dung lượng, Số nguồn, Máy sở hữu, Mã SHA-256) ---
         fileNameColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().fileName()));
         fileSizeColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().formattedSize()));
+        fileSourcesColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().peerCountDisplay()));
         fileOwnerColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().ownerDisplay()));
         fileHashColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().sha256Hash()));
         sharedFileTable.setPlaceholder(new Label("Chưa có tệp nào trong thư mục chia sẻ hoặc từ các Peer"));
@@ -143,13 +166,13 @@ public class MainController implements PeerDiscoveryListener {
         filteredFileList = new FilteredList<>(masterFileList, file -> true);
         sharedFileTable.setItems(filteredFileList);
 
-        // Lọc danh sách tệp ngay khi người dùng gõ vào ô tìm kiếm.
         searchTextField.textProperty().addListener((obs, oldQuery, newQuery) -> {
             String keyword = (newQuery == null) ? "" : newQuery.trim().toLowerCase(Locale.ROOT);
             filteredFileList.setPredicate(file -> matchesSearchKeyword(file, keyword));
         });
 
         updateSharedFolderLabel();
+        appendNetworkLog("Khởi tạo hệ thống P2P File Sharing (AtlantaFX UI + Swarm + Pause/Resume)...");
 
         // --- 3. Khởi động UDP Discovery & P2P Multi-Command TCP Server ---
         startDiscovery();
@@ -174,11 +197,15 @@ public class MainController implements PeerDiscoveryListener {
         discoveryService = new DiscoveryService(this);
         try {
             discoveryService.start();
+            appendNetworkLog("UDP Discovery đã mở trên cổng " + discoveryService.getPort() + " (Broadcast 3s/lần).");
         } catch (BindException e) {
-            setStatus("Lỗi: UDP port " + discoveryService.getPort()
-                    + " đang bị chiếm (có thể ứng dụng đang chạy ở cửa sổ khác).");
+            String msg = "Lỗi: UDP port " + discoveryService.getPort() + " đang bị chiếm!";
+            setStatus(msg);
+            appendNetworkLog(msg);
         } catch (IOException e) {
-            setStatus("Lỗi: không khởi động được Discovery - " + e.getMessage());
+            String msg = "Lỗi: không khởi động được Discovery - " + e.getMessage();
+            setStatus(msg);
+            appendNetworkLog(msg);
         }
     }
 
@@ -187,15 +214,22 @@ public class MainController implements PeerDiscoveryListener {
         p2pServer = new P2PServer(
                 P2PServer.DEFAULT_PORT,
                 sharedFolderManager,
-                receivedFile -> runOnFxThread(() -> mergeFilesIntoTable(List.of(receivedFile), false))
+                receivedFile -> runOnFxThread(() -> addOrUpdateFileEntries(List.of(receivedFile), false)),
+                this::appendNetworkLog
         );
 
         bindUiToTask(p2pServer);
-        p2pServer.messageProperty().addListener((obs, oldMsg, newMsg) -> bindUiToTask(p2pServer));
+        p2pServer.messageProperty().addListener((obs, oldMsg, newMsg) -> {
+            if (!downloadManager.isDownloading()) {
+                bindUiToTask(p2pServer);
+            }
+        });
 
         Thread serverThread = new Thread(p2pServer, "p2p-multi-command-server");
         serverThread.setDaemon(true);
         serverThread.start();
+        appendNetworkLog("TCP Multi-Command Server lắng nghe cổng " + P2PServer.DEFAULT_PORT
+                + " (LIST_FILES, DOWNLOAD_FILE, DOWNLOAD_CHUNK, PUSH_FILE).");
     }
 
     /** Giải phóng tài nguyên mạng khi người dùng bấm X tắt ứng dụng. */
@@ -209,7 +243,7 @@ public class MainController implements PeerDiscoveryListener {
     }
 
     // ------------------------------------------------------------------------------------------
-    // PeerDiscoveryListener (chạy trên luồng mạng UDP -> chuyển về JavaFX Thread)
+    // PeerDiscoveryListener
     // ------------------------------------------------------------------------------------------
 
     @Override
@@ -220,8 +254,8 @@ public class MainController implements PeerDiscoveryListener {
                 peerList.set(index, peer);
             } else {
                 peerList.add(peer);
+                appendNetworkLog("Phát hiện Peer mới trong mạng LAN: " + peer);
             }
-            // Tự động hỏi danh sách tệp chia sẻ của Peer vừa phát hiện.
             fetchFilesFromPeersAsync(List.of(peer));
         });
     }
@@ -230,23 +264,35 @@ public class MainController implements PeerDiscoveryListener {
     public void onPeerLost(Peer peer) {
         runOnFxThread(() -> {
             peerList.removeIf(p -> p.isSamePeer(peer));
-            masterFileList.removeIf(f -> f.ownerIp().equals(peer.ipAddress()));
+            rawFileEntries.removeIf(f -> f.ownerIp().equals(peer.ipAddress()));
+            rebuildMergedFileTable();
+            appendNetworkLog("Peer đã offline: " + peer);
         });
     }
 
     @Override
     public void onDiscoveryError(String message, Throwable cause) {
-        runOnFxThread(() -> setStatus("Lỗi mạng: " + message));
+        runOnFxThread(() -> {
+            setStatus("Lỗi mạng: " + message);
+            appendNetworkLog("Cảnh báo mạng: " + message);
+        });
     }
 
     // ------------------------------------------------------------------------------------------
-    // Sự kiện giao diện: Chọn Shared Folder, Làm mới LIST_FILES, Tải tệp (Pull), Gửi tệp (Push)
+    // Sự kiện giao diện: Theme, Shared Folder, LIST_FILES, Tải (Swarm/Resume), Pause, Resume, Cancel
     // ------------------------------------------------------------------------------------------
 
-    /**
-     * Nút "Chọn thư mục chia sẻ": mở {@link DirectoryChooser}, đổi thư mục chia sẻ
-     * và quét + băm SHA-256 toàn bộ tệp trong thư mục đó trên luồng nền.
-     */
+    /** Nút chuyển đổi giao diện Sáng / Tối (Primer Light <-> Nord Dark) của AtlantaFX. */
+    @FXML
+    private void handleToggleTheme() {
+        boolean isDark = MainApplication.toggleTheme();
+        if (themeToggleButton != null) {
+            themeToggleButton.setText(isDark ? "Primer Light" : "Nord Dark");
+        }
+        appendNetworkLog("Đã chuyển giao diện sang theme AtlantaFX: " + (isDark ? "Nord Dark" : "Primer Light"));
+    }
+
+    /** Nút "Chọn thư mục chia sẻ": đổi Shared Folder và băm SHA-256 trên luồng nền. */
     @FXML
     private void handleChooseSharedFolder() {
         DirectoryChooser chooser = new DirectoryChooser();
@@ -264,16 +310,16 @@ public class MainController implements PeerDiscoveryListener {
 
         sharedFolderManager.setSharedFolder(selectedDir);
         updateSharedFolderLabel();
+        appendNetworkLog("Đã đổi thư mục chia sẻ sang: " + selectedDir.getAbsolutePath());
         scanLocalSharedFolderAsync();
     }
 
-    /**
-     * Nút "Làm mới danh sách tệp": quét lại thư mục chia sẻ cục bộ và gửi lệnh {@code LIST_FILES}
-     * tới toàn bộ các Peer đang online trong mạng LAN để gom danh sách tệp mới nhất.
-     */
+    /** Nút "Làm mới danh sách tệp": quét lại máy cục bộ và gửi LIST_FILES tới mọi Peer. */
     @FXML
     private void handleRefreshFiles() {
         List<Peer> snapshotPeers = new ArrayList<>(peerList);
+        appendNetworkLog("Đang làm mới danh sách tệp từ thư mục chia sẻ và " + snapshotPeers.size() + " Peer...");
+
         Task<List<SharedFile>> refreshTask = new Task<>() {
             @Override
             protected List<SharedFile> call() {
@@ -293,13 +339,13 @@ public class MainController implements PeerDiscoveryListener {
                     try {
                         combined.addAll(P2PServer.requestFileListFromPeer(peer));
                     } catch (IOException ignored) {
-                        // Peer tạm thời bận hoặc đóng kết nối -> tiếp tục hỏi các Peer còn lại.
+                        // Peer tạm thời bận -> tiếp tục hỏi các Peer còn lại.
                     }
                 }
 
                 updateProgress(1.0, 1.0);
                 updateMessage("Trạng thái: Đã làm mới danh sách (" + combined.size()
-                        + " tệp từ máy bạn và " + snapshotPeers.size() + " Peer)");
+                        + " mục từ máy bạn và " + snapshotPeers.size() + " Peer)");
                 return combined;
             }
         };
@@ -307,7 +353,8 @@ public class MainController implements PeerDiscoveryListener {
         refreshTask.setOnSucceeded(event -> {
             List<SharedFile> files = refreshTask.getValue();
             if (files != null) {
-                mergeFilesIntoTable(files, true);
+                addOrUpdateFileEntries(files, true);
+                appendNetworkLog("Làm mới hoàn tất: tổng hợp được " + masterFileList.size() + " tệp duy nhất.");
             }
         });
 
@@ -318,9 +365,10 @@ public class MainController implements PeerDiscoveryListener {
     }
 
     /**
-     * Nút "Tải tệp đã chọn" (Pull Protocol):
-     * Khởi chạy {@link FileDownloadTask}, bind với {@code ProgressBar} và {@code statusLabel},
-     * đo tốc độ MB/s và xác thực SHA-256 On-the-fly.
+     * Nút "Tải tệp đã chọn":
+     * Giao cho {@link DownloadManager} tự động chọn tải Đa nguồn ({@code SwarmDownloadTask})
+     * nếu có nhiều Peer cùng giữ mã SHA-256, hoặc tải Đơn nguồn có hỗ trợ Pause/Resume
+     * ({@code ResumableDownloadTask}).
      */
     @FXML
     private void handleDownloadSelectedFile() {
@@ -334,27 +382,40 @@ public class MainController implements PeerDiscoveryListener {
             return;
         }
 
-        // Nếu người dùng chọn tệp của chính máy mình, vẫn cho phép tải thử qua loopback (127.0.0.1)
-        // để có thể kiểm thử ngay trên 1 máy!
-        String targetIp = selectedFile.isLocal() ? "127.0.0.1" : selectedFile.ownerIp();
-
-        FileDownloadTask downloadTask = new FileDownloadTask(
-                targetIp,
-                P2PServer.DEFAULT_PORT,
-                selectedFile.fileName()
-        );
-
+        Task<Boolean> downloadTask = downloadManager.startDownload(selectedFile);
         bindUiToTask(downloadTask);
-
-        Thread downloadThread = new Thread(downloadTask, "p2p-file-download");
-        downloadThread.setDaemon(true);
-        downloadThread.start();
     }
 
-    /**
-     * Nút "Chọn file" (Push Protocol):
-     * Chọn một Peer ở cột trái rồi chủ động đẩy một tệp bất kỳ trên máy sang Peer đó.
-     */
+    /** Nút "Tạm dừng (Pause)": tạm dừng phiên tải đang chạy, giữ nguyên tệp {@code .part}. */
+    @FXML
+    private void handlePauseDownload() {
+        boolean paused = downloadManager.pauseCurrentDownload();
+        if (!paused) {
+            setStatus("Không có tác vụ tải nào đang chạy để tạm dừng.");
+        }
+    }
+
+    /** Nút "Tiếp tục (Resume)": tải nối tiếp từ byte offset của tệp {@code .part}. */
+    @FXML
+    private void handleResumeDownload() {
+        Task<Boolean> resumedTask = downloadManager.resumeCurrentDownload();
+        if (resumedTask != null) {
+            bindUiToTask(resumedTask);
+        } else {
+            setStatus("Không có phiên tải gián đoạn nào (.part) để tiếp tục.");
+        }
+    }
+
+    /** Nút "Hủy (Cancel)": dừng phiên tải và xóa sạch tệp tạm {@code .part}. */
+    @FXML
+    private void handleCancelDownload() {
+        downloadManager.cancelCurrentDownload();
+        transferProgressBar.progressProperty().unbind();
+        transferProgressBar.setProgress(0.0);
+        setStatus("Đã hủy tải và xóa tệp tạm (.part).");
+    }
+
+    /** Nút "Chọn file (Push)": chủ động đẩy một tệp sang Peer đang chọn bên trái. */
     @FXML
     private void handleChooseFile() {
         Peer selectedPeer = peerListView.getSelectionModel().getSelectedItem();
@@ -377,6 +438,7 @@ public class MainController implements PeerDiscoveryListener {
             return;
         }
 
+        appendNetworkLog("Bắt đầu Push tệp \"" + selectedFile.getName() + "\" tới " + selectedPeer + "...");
         FileSenderTask senderTask = new FileSenderTask(selectedFile, selectedPeer.ipAddress());
         bindUiToTask(senderTask);
 
@@ -391,17 +453,20 @@ public class MainController implements PeerDiscoveryListener {
     }
 
     // ------------------------------------------------------------------------------------------
-    // Tiện ích quét thư mục và truy vấn LIST_FILES bất đồng bộ
+    // Gộp tệp trùng SHA-256 (Swarm Grouping) & Nhật ký sự kiện mạng
     // ------------------------------------------------------------------------------------------
 
     private void scanLocalSharedFolderAsync() {
         Task<List<SharedFile>> scanTask = sharedFolderManager.createScanTask();
         scanTask.setOnSucceeded(e -> {
             List<SharedFile> localFiles = scanTask.getValue();
-            masterFileList.removeIf(SharedFile::isLocal);
+            rawFileEntries.removeIf(SharedFile::isLocal);
             if (localFiles != null) {
-                masterFileList.addAll(0, localFiles);
+                rawFileEntries.addAll(0, localFiles);
+                appendNetworkLog("Đã băm SHA-256 xong " + localFiles.size()
+                        + " tệp trong thư mục chia sẻ cục bộ.");
             }
+            rebuildMergedFileTable();
         });
         bindUiToTask(scanTask);
 
@@ -433,10 +498,11 @@ public class MainController implements PeerDiscoveryListener {
             List<SharedFile> remoteFiles = listTask.getValue();
             if (remoteFiles != null && !remoteFiles.isEmpty()) {
                 for (Peer p : peersToQuery) {
-                    masterFileList.removeIf(f -> f.ownerIp().equals(p.ipAddress()));
+                    rawFileEntries.removeIf(f -> f.ownerIp().equals(p.ipAddress()));
                 }
-                mergeFilesIntoTable(remoteFiles, false);
-                setStatus("Đã tải danh sách " + remoteFiles.size() + " tệp từ " + peersToQuery.get(0));
+                addOrUpdateFileEntries(remoteFiles, false);
+                appendNetworkLog("Nhận danh sách " + remoteFiles.size()
+                        + " tệp từ Peer " + peersToQuery.get(0));
             }
         });
 
@@ -445,22 +511,49 @@ public class MainController implements PeerDiscoveryListener {
         t.start();
     }
 
-    /** Hợp nhất danh sách tệp vào bảng và loại bỏ các bản ghi trùng lặp (cùng IP + tên tệp + SHA-256). */
-    private void mergeFilesIntoTable(List<SharedFile> incomingFiles, boolean replaceAll) {
-        Map<String, SharedFile> uniqueMap = new LinkedHashMap<>();
-        if (!replaceAll) {
-            for (SharedFile existing : masterFileList) {
-                uniqueMap.put(uniqueKey(existing), existing);
-            }
+    /**
+     * Cập nhật danh sách tệp thô và tự động gộp các tệp có cùng mã {@code sha256Hash}
+     * từ nhiều Peer thành 1 dòng duy nhất trên {@code TableView} với danh sách {@code peerIps} đầy đủ.
+     */
+    private void addOrUpdateFileEntries(List<SharedFile> incomingFiles, boolean replaceAll) {
+        if (replaceAll) {
+            rawFileEntries.clear();
         }
         for (SharedFile incoming : incomingFiles) {
-            uniqueMap.put(uniqueKey(incoming), incoming);
+            rawFileEntries.removeIf(existing ->
+                    existing.ownerIp().equals(incoming.ownerIp())
+                            && existing.fileName().equals(incoming.fileName()));
+            rawFileEntries.add(incoming);
         }
-        masterFileList.setAll(uniqueMap.values());
+        rebuildMergedFileTable();
     }
 
-    private static String uniqueKey(SharedFile file) {
-        return file.ownerIp() + "|" + file.fileName() + "|" + file.sha256Hash();
+    private void rebuildMergedFileTable() {
+        Map<String, SharedFile> mergedBySha256 = new LinkedHashMap<>();
+        for (SharedFile entry : rawFileEntries) {
+            String key = entry.sha256Hash().toLowerCase(Locale.ROOT);
+            SharedFile existing = mergedBySha256.get(key);
+            if (existing == null) {
+                mergedBySha256.put(key, entry);
+            } else {
+                mergedBySha256.put(key, existing.mergeWith(entry));
+            }
+        }
+        masterFileList.setAll(mergedBySha256.values());
+    }
+
+    /**
+     * Ghi một dòng sự kiện kèm mốc thời gian {@code [HH:mm:ss]} vào ô Nhật ký sự kiện mạng.
+     * Tự động chuyển về JavaFX Application Thread nếu được gọi từ luồng mạng.
+     */
+    public void appendNetworkLog(String eventMessage) {
+        String timestamp = LocalTime.now().format(TIME_FORMATTER);
+        String line = "[" + timestamp + "] " + eventMessage + "\n";
+        runOnFxThread(() -> {
+            if (networkLogArea != null) {
+                networkLogArea.appendText(line);
+            }
+        });
     }
 
     private void updateSharedFolderLabel() {

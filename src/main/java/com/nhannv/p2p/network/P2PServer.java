@@ -15,6 +15,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.net.BindException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -36,34 +37,32 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * Máy chủ TCP Đa Lệnh (Multi-Command P2P TCP Server) nâng cấp cho Milestone 3.
+ * Máy chủ TCP Đa Lệnh (Multi-Command P2P TCP Server) hoàn chỉnh cho Milestone 4.
  *
- * <h2>Giải thích Giao thức TCP Đa Lệnh (Application Command Protocol) cho Huỳnh Nhân Danh</h2>
- * Thay vì mỗi cổng chỉ làm một việc cố định, mọi kết nối TCP tới cổng {@value #DEFAULT_PORT}
- * đều gửi một chuỗi lệnh đầu tiên (<b>Command Header</b> bằng {@link DataOutputStream#writeUTF(String)})
- * để Server phân nhánh xử lý trên {@link ExecutorService} (Thread Pool):
- *
- * <pre>
- * ┌──────────────────────────────────────────────────────────────────────────────────┐
- * │ 1. Lệnh "LIST_FILES" (Truy vấn danh sách tệp chia sẻ của Peer)                   │
- * │    • Client -> Server : writeUTF("LIST_FILES")                                   │
- * │    • Server -> Client : writeInt(fileCount)                                      │
- * │                         Lặp fileCount lần: writeUTF("name|size|sha256|ip|owner") │
- * ├──────────────────────────────────────────────────────────────────────────────────┤
- * │ 2. Lệnh "DOWNLOAD_FILE" (Pull Protocol - Tải tệp từ Shared Folder của Peer)      │
- * │    • Client -> Server : writeUTF("DOWNLOAD_FILE") + writeUTF(requestedFileName)  │
- * │    • Server -> Client :                                                          │
- * │        - Nếu không tìm thấy: writeLong(-1L)                                      │
- * │        - Nếu hợp lệ        : writeLong(fileSize) + writeUTF(sha256Hash)          │
- * │                              + Luồng Raw Bytes cắt theo từng Chunk 64KB          │
- * ├──────────────────────────────────────────────────────────────────────────────────┤
- * │ 3. Lệnh "PUSH_FILE" (Push Protocol - Chủ động đẩy tệp sang máy bạn)              │
- * │    • Client -> Server : writeUTF("PUSH_FILE") + writeUTF(fileName)               │
- * │                         + writeLong(fileSize) + writeUTF(sha256Hash)             │
- * │                         + Luồng Raw Bytes theo từng Chunk 64KB                   │
- * │    • Server nhận theo từng Chunk 64KB, băm SHA-256 On-the-fly và đối chiếu ngay! │
- * └──────────────────────────────────────────────────────────────────────────────────┘
- * </pre>
+ * <h2>Giải thích Giao thức TCP Đa Lệnh & RandomAccessFile.seek() cho vấn đáp đồ án</h2>
+ * Mọi kết nối TCP tới cổng {@value #DEFAULT_PORT} đều gửi chuỗi lệnh đầu tiên (<b>Command Header</b>)
+ * để Server phân nhánh xử lý song song trên {@link ExecutorService}:
+ * <ol>
+ *   <li><b>{@code "LIST_FILES"}:</b> Trả về danh sách {@link SharedFile} trong Shared Folder.</li>
+ *   <li><b>{@code "DOWNLOAD_FILE"}:</b> Tải nguyên tệp từ byte 0 đến hết tệp.</li>
+ *   <li><b>{@code "DOWNLOAD_CHUNK"} (MỚI - Milestone 4):</b>
+ *       <ul>
+ *         <li>Client gửi: {@code fileName} (UTF) + {@code startOffset} (long) + {@code length} (long).</li>
+ *         <li>Server mở tệp bằng {@link RandomAccessFile} ở chế độ {@code "r"} (chỉ đọc) và gọi
+ *             {@link RandomAccessFile#seek(long) raf.seek(startOffset)}.</li>
+ *         <li><b>Tại sao dùng {@code RandomAccessFile.seek(startOffset)}?</b>
+ *             Với {@code FileInputStream} thông thường, muốn nhảy tới byte thứ 4GB thì phải đọc bỏ qua
+ *             tuần tự 4GB đầu tiên trên đĩa. Ngược lại, {@code RandomAccessFile.seek(startOffset)}
+ *             di chuyển con trỏ tệp (File Pointer) của hệ điều hành nhảy thẳng tới đúng vị trí byte
+ *             {@code startOffset} với độ phức tạp <b>O(1) (tức thì, 0ms)</b>, sau đó chỉ đọc và truyền
+ *             đúng {@code length} byte được yêu cầu.</li>
+ *         <li>Nhờ lệnh {@code DOWNLOAD_CHUNK} duy nhất này, hệ thống giải quyết được đồng thời cả
+ *             <b>Pause/Resume</b> (tải tiếp từ byte bị đứt) lẫn <b>Multi-source Swarm Download</b>
+ *             (nhiều luồng xin các đoạn {@code [startOffset, length]} khác nhau từ nhiều Peer cùng lúc).</li>
+ *       </ul>
+ *   </li>
+ *   <li><b>{@code "PUSH_FILE"}:</b> Nhận tệp đẩy trực tiếp và xác thực SHA-256 On-the-fly.</li>
+ * </ol>
  */
 public class P2PServer extends Task<Void> {
 
@@ -75,6 +74,7 @@ public class P2PServer extends Task<Void> {
     /** Các mã lệnh (Command Header) chuẩn của giao thức P2P. */
     public static final String CMD_LIST_FILES = "LIST_FILES";
     public static final String CMD_DOWNLOAD_FILE = "DOWNLOAD_FILE";
+    public static final String CMD_DOWNLOAD_CHUNK = "DOWNLOAD_CHUNK";
     public static final String CMD_PUSH_FILE = "PUSH_FILE";
 
     /** Kích thước mỗi khối (Chunk size) đọc/ghi mạng và đĩa = 64 KB. */
@@ -90,20 +90,35 @@ public class P2PServer extends Task<Void> {
     private final SharedFolderManager sharedFolderManager;
     private final Path downloadDirectory;
     private final Consumer<SharedFile> onFileReceivedCallback;
+    private final Consumer<String> eventLogger;
 
-    /** Thread Pool xử lý đồng thời nhiều Peer cùng truy vấn danh sách hoặc tải tệp. */
+    /** Thread Pool xử lý đồng thời nhiều Peer cùng truy vấn danh sách hoặc tải các phân đoạn. */
     private final ExecutorService clientWorkerPool;
     private volatile ServerSocket serverSocket;
 
     public P2PServer(SharedFolderManager sharedFolderManager, Consumer<SharedFile> onFileReceivedCallback) {
-        this(DEFAULT_PORT, sharedFolderManager, onFileReceivedCallback);
+        this(DEFAULT_PORT, sharedFolderManager, onFileReceivedCallback, null);
     }
 
-    public P2PServer(int port, SharedFolderManager sharedFolderManager, Consumer<SharedFile> onFileReceivedCallback) {
+    public P2PServer(
+            int port,
+            SharedFolderManager sharedFolderManager,
+            Consumer<SharedFile> onFileReceivedCallback
+    ) {
+        this(port, sharedFolderManager, onFileReceivedCallback, null);
+    }
+
+    public P2PServer(
+            int port,
+            SharedFolderManager sharedFolderManager,
+            Consumer<SharedFile> onFileReceivedCallback,
+            Consumer<String> eventLogger
+    ) {
         this.port = port;
         this.sharedFolderManager = Objects.requireNonNull(sharedFolderManager, "sharedFolderManager");
         this.downloadDirectory = Path.of(DOWNLOADS_DIR_NAME).toAbsolutePath();
         this.onFileReceivedCallback = onFileReceivedCallback;
+        this.eventLogger = eventLogger;
 
         AtomicInteger threadCounter = new AtomicInteger(1);
         this.clientWorkerPool = Executors.newCachedThreadPool(runnable -> {
@@ -130,7 +145,6 @@ public class P2PServer extends Task<Void> {
             while (!isCancelled() && !ss.isClosed()) {
                 try {
                     Socket clientSocket = ss.accept();
-                    // Giao từng kết nối cho Thread Pool xử lý song song, không làm nghẽn vòng lặp accept().
                     clientWorkerPool.submit(() -> handleClientConnection(clientSocket));
                 } catch (SocketException e) {
                     if (isCancelled() || ss.isClosed()) {
@@ -167,32 +181,24 @@ public class P2PServer extends Task<Void> {
             DataOutputStream dos = new DataOutputStream(
                     new BufferedOutputStream(socket.getOutputStream(), CHUNK_BUFFER_SIZE));
 
-            // Đọc Command Header đầu tiên.
             String command = dis.readUTF();
 
             switch (command) {
                 case CMD_LIST_FILES -> handleListFilesCommand(dos);
                 case CMD_DOWNLOAD_FILE -> handleDownloadFileCommand(dis, dos, peerIp);
+                case CMD_DOWNLOAD_CHUNK -> handleDownloadChunkCommand(dis, dos, peerIp);
                 case CMD_PUSH_FILE -> handlePushFileCommand(dis, peerIp, true);
-                default -> {
-                    // Tương thích ngược: nếu Peer cũ gửi thẳng tên tệp (chưa có header PUSH_FILE).
-                    handleLegacyPushFile(command, dis, peerIp);
-                }
+                default -> handleLegacyPushFile(command, dis, peerIp);
             }
         } catch (EOFException e) {
-            LOG.log(Level.WARNING, "Peer " + peerIp + " ngắt kết nối đột ngột", e);
-            updateProgress(0.0, 1.0);
-            updateMessage("Trạng thái: Cảnh báo - Peer " + peerIp + " ngắt kết nối đột ngột!");
+            LOG.log(Level.FINE, "Peer " + peerIp + " đã đóng luồng kết nối", e);
         } catch (IOException e) {
-            LOG.log(Level.WARNING, "Lỗi xử lý yêu cầu từ Peer " + peerIp, e);
-            updateProgress(0.0, 1.0);
-            updateMessage("Trạng thái: Lỗi giao tiếp với Peer " + peerIp + " - " + e.getMessage());
+            LOG.log(Level.FINE, "Kết thúc phiên giao tiếp với Peer " + peerIp + ": " + e.getMessage());
         }
     }
 
     /**
      * Nhánh 1: Xử lý lệnh {@code "LIST_FILES"}.
-     * Trả về danh sách các {@link SharedFile} đang có trong Shared Folder của máy mình.
      */
     private void handleListFilesCommand(DataOutputStream dos) throws IOException {
         List<SharedFile> files = sharedFolderManager.getSharedFiles();
@@ -204,8 +210,7 @@ public class P2PServer extends Task<Void> {
     }
 
     /**
-     * Nhánh 2: Xử lý lệnh {@code "DOWNLOAD_FILE"}.
-     * Đọc tên tệp yêu cầu -> gửi kích thước tệp + mã SHA-256 gốc -> đẩy dữ liệu theo từng chunk 64KB.
+     * Nhánh 2: Xử lý lệnh {@code "DOWNLOAD_FILE"} (tải toàn bộ tệp từ đầu).
      */
     private void handleDownloadFileCommand(DataInputStream dis, DataOutputStream dos, String requesterIp)
             throws IOException {
@@ -222,35 +227,92 @@ public class P2PServer extends Task<Void> {
         String sha256 = (meta != null) ? meta.sha256Hash() : HashUtil.calculateSHA256(fileOnDisk);
         long fileSize = fileOnDisk.length();
 
-        // Gửi Header phản hồi: kích thước tệp + mã SHA-256 gốc.
         dos.writeLong(fileSize);
         dos.writeUTF(sha256);
 
-        // Đẩy luồng dữ liệu tệp theo từng chunk 64KB.
         byte[] buffer = new byte[CHUNK_BUFFER_SIZE];
-        long totalSent = 0;
-        long startNano = System.nanoTime();
-
         try (BufferedInputStream fis = new BufferedInputStream(new FileInputStream(fileOnDisk), CHUNK_BUFFER_SIZE)) {
             int bytesRead;
             while ((bytesRead = fis.read(buffer)) != -1 && !isCancelled()) {
                 dos.write(buffer, 0, bytesRead);
-                totalSent += bytesRead;
-
-                double speed = calculateSpeedMBps(totalSent, startNano);
-                updateMessage(String.format(Locale.US,
-                        "Trạng thái: Đang gửi \"%s\" cho %s (%.2f MB/s)",
-                        fileOnDisk.getName(), requesterIp, speed));
             }
         }
         dos.flush();
-        updateMessage("Trạng thái: Đã phục vụ xong tệp \"" + fileOnDisk.getName() + "\" cho " + requesterIp);
+        logServerEvent("Đã gửi toàn bộ tệp \"" + fileOnDisk.getName() + "\" tới Peer " + requesterIp);
     }
 
     /**
-     * Nhánh 3: Xử lý lệnh {@code "PUSH_FILE"}.
-     * Nhận tệp do một Peer chủ động đẩy sang, băm SHA-256 On-the-fly ngay khi đọc các chunk 64KB
-     * và đối chiếu với mã SHA-256 gốc trong Header.
+     * Nhánh 3 (MỚI - Milestone 4): Xử lý lệnh {@code "DOWNLOAD_CHUNK"}.
+     * <p>
+     * <b>Cơ chế hoạt động:</b>
+     * <ol>
+     *   <li>Đọc 3 tham số từ Client: {@code fileName}, {@code startOffset} (vị trí byte bắt đầu),
+     *       và {@code length} (số lượng byte cần lấy).</li>
+     *   <li>Gửi phản hồi Header gồm: {@code totalFileSize} (để Client kiểm tra kích thước tổng),
+     *       {@code actualChunkLength} (số byte thực tế sẽ gửi), và {@code sha256Hash} gốc của tệp.</li>
+     *   <li>Mở tệp bằng {@code new RandomAccessFile(fileOnDisk, "r")} (chế độ chỉ đọc, an toàn cho
+     *       nhiều luồng cùng đọc song song), gọi {@code raf.seek(startOffset)} để nhảy thẳng tới
+     *       vị trí byte bắt đầu, rồi đọc từng khối 64KB cho tới khi gửi đủ {@code actualChunkLength} byte.</li>
+     * </ol>
+     */
+    private void handleDownloadChunkCommand(DataInputStream dis, DataOutputStream dos, String requesterIp)
+            throws IOException {
+        String requestedFileName = dis.readUTF();
+        long startOffset = dis.readLong();
+        long requestedLength = dis.readLong();
+
+        File fileOnDisk = sharedFolderManager.resolveSharedFileOnDisk(requestedFileName);
+        if (fileOnDisk == null || !fileOnDisk.exists()) {
+            dos.writeLong(-1L);
+            dos.flush();
+            return;
+        }
+
+        long totalFileSize = fileOnDisk.length();
+        if (startOffset < 0 || startOffset > totalFileSize || requestedLength < 0) {
+            dos.writeLong(-1L);
+            dos.flush();
+            return;
+        }
+
+        // Số byte thực tế có thể đọc từ vị trí startOffset (không vượt quá phần còn lại của tệp).
+        long actualLength = Math.min(requestedLength, totalFileSize - startOffset);
+
+        SharedFile meta = sharedFolderManager.findMetadataByName(fileOnDisk.getName());
+        String sha256 = (meta != null) ? meta.sha256Hash() : HashUtil.calculateSHA256(fileOnDisk);
+
+        // Gửi Header phản hồi cho DOWNLOAD_CHUNK:
+        // [totalFileSize (long)] + [actualLength (long)] + [sha256 (UTF)]
+        dos.writeLong(totalFileSize);
+        dos.writeLong(actualLength);
+        dos.writeUTF(sha256);
+
+        logServerEvent(String.format(Locale.US,
+                "Phục vụ DOWNLOAD_CHUNK \"%s\" cho %s [offset=%d, length=%d bytes]",
+                fileOnDisk.getName(), requesterIp, startOffset, actualLength));
+
+        // Mở tệp bằng RandomAccessFile ở chế độ "r" (read-only) và nhảy thẳng tới startOffset.
+        byte[] buffer = new byte[CHUNK_BUFFER_SIZE];
+        try (RandomAccessFile raf = new RandomAccessFile(fileOnDisk, "r")) {
+            // Nhảy con trỏ tệp thẳng tới vị trí byte bắt đầu (độ phức tạp O(1)).
+            raf.seek(startOffset);
+
+            long remaining = actualLength;
+            while (remaining > 0 && !isCancelled()) {
+                int maxToRead = (int) Math.min(buffer.length, remaining);
+                int bytesRead = raf.read(buffer, 0, maxToRead);
+                if (bytesRead == -1) {
+                    break;
+                }
+                dos.write(buffer, 0, bytesRead);
+                remaining -= bytesRead;
+            }
+        }
+        dos.flush();
+    }
+
+    /**
+     * Nhánh 4: Xử lý lệnh {@code "PUSH_FILE"}.
      */
     private void handlePushFileCommand(DataInputStream dis, String senderIp, boolean hasSha256Header)
             throws IOException {
@@ -282,8 +344,8 @@ public class P2PServer extends Task<Void> {
 
         updateProgress(0, Math.max(totalBytes, 1));
         updateMessage("Trạng thái: Đang nhận \"" + outputFile.getName() + "\" từ " + senderIp + "...");
+        logServerEvent("Đang nhận tệp Push \"" + outputFile.getName() + "\" từ Peer " + senderIp);
 
-        // Khởi tạo MessageDigest để băm SHA-256 On-the-fly ngay trong lúc đọc luồng mạng.
         MessageDigest digest = HashUtil.newSha256Digest();
         byte[] buffer = new byte[CHUNK_BUFFER_SIZE];
         long totalBytesRead = 0;
@@ -300,7 +362,6 @@ public class P2PServer extends Task<Void> {
                     break;
                 }
                 bos.write(buffer, 0, bytesRead);
-                // ON-THE-FLY HASHING: Cập nhật từng khối byte vừa nhận vào bộ băm SHA-256.
                 digest.update(buffer, 0, bytesRead);
 
                 totalBytesRead += bytesRead;
@@ -325,11 +386,14 @@ public class P2PServer extends Task<Void> {
             Files.deleteIfExists(outputFile.toPath());
             updateProgress(0.0, 1.0);
             updateMessage("Cảnh báo: File bị hỏng trong quá trình truyền (Sai lệch SHA-256)!");
+            logServerEvent("CẢNH BÁO: Tệp Push \"" + outputFile.getName() + "\" sai lệch SHA-256 -> Đã xóa!");
             return;
         }
 
         updateProgress(1.0, 1.0);
         updateMessage("Tải hoàn tất! SHA-256 hợp lệ: [" + HashUtil.shortHash(actualSha256) + "]");
+        logServerEvent("Đã nhận hoàn tất \"" + outputFile.getName()
+                + "\" | SHA-256 hợp lệ: [" + HashUtil.shortHash(actualSha256) + "]");
 
         if (onFileReceivedCallback != null) {
             onFileReceivedCallback.accept(new SharedFile(
@@ -343,9 +407,7 @@ public class P2PServer extends Task<Void> {
     }
 
     /**
-     * Hàm tiện ích phía Client: gửi lệnh {@code "LIST_FILES"} tới một {@link Peer}
-     * và nhận về danh sách {@link SharedFile} mà Peer đó đang chia sẻ.
-     * <b>Luôn gọi hàm này từ Background Thread!</b>
+     * Hàm tiện ích phía Client: gửi lệnh {@code "LIST_FILES"} tới một {@link Peer}.
      */
     public static List<SharedFile> requestFileListFromPeer(Peer peer) throws IOException {
         return requestFileListFromPeer(peer, DEFAULT_PORT);
@@ -373,13 +435,13 @@ public class P2PServer extends Task<Void> {
                     String line = dis.readUTF();
                     SharedFile sf = SharedFile.fromWireLine(line, peer.ipAddress());
                     if (sf != null) {
-                        // Đảm bảo thông tin tên máy/IP của Peer hiển thị chính xác.
                         files.add(new SharedFile(
                                 sf.fileName(),
                                 sf.fileSize(),
                                 sf.sha256Hash(),
                                 peer.ipAddress(),
-                                peer.hostName()
+                                peer.hostName(),
+                                List.of(peer.ipAddress())
                         ));
                     }
                 }
@@ -403,6 +465,12 @@ public class P2PServer extends Task<Void> {
             counter++;
         }
         return candidate.toFile();
+    }
+
+    private void logServerEvent(String message) {
+        if (eventLogger != null) {
+            eventLogger.accept(message);
+        }
     }
 
     private static double calculateSpeedMBps(long bytesTransferred, long startTimeNano) {
