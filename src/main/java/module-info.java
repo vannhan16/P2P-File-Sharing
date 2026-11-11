@@ -5,4 +5,9 @@ module com.p2pfilesharing {
 
     opens com.p2pfilesharing to javafx.fxml;
     exports com.p2pfilesharing;
+
+    // P2P application packages
+    opens com.nhannv.p2p.ui to javafx.fxml;
+    exports com.nhannv.p2p;
+    exports com.nhannv.p2p.model;
 }
