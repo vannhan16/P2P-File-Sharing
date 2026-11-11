@@ -69,7 +69,7 @@
               style="-fx-background-color: white; -fx-border-color: #e5e7eb transparent transparent transparent;">
             <padding><Insets top="10" right="16" bottom="10" left="16"/></padding>
             <Button fx:id="chooseFileButton" text="Chọn file"
-                    onAction="#onChooseFileClicked" defaultButton="true"/>
+                    onAction="#handleChooseFile" defaultButton="true"/>
             <Label fx:id="statusLabel" text="Trạng thái: Sẵn sàng" HBox.hgrow="ALWAYS" maxWidth="Infinity"
                    style="-fx-text-fill: #4b5563;"/>
             <ProgressBar fx:id="transferProgressBar" progress="0.0" prefWidth="220"/>
