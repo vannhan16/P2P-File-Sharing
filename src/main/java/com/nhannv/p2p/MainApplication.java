@@ -21,9 +21,9 @@ import java.net.URL;
 public class MainApplication extends Application {
 
     private static final String MAIN_VIEW = "/com/nhannv/p2p/layout/MainView.fxml";
-    private static final String APP_TITLE = "P2P LAN File Sharing - VKU (Pause/Resume & Swarm Edition)";
-    private static final double DEFAULT_WIDTH = 1080;
-    private static final double DEFAULT_HEIGHT = 720;
+    private static final String APP_TITLE = "P2P LAN & Internet File Sharing - VKU (Swarm, Security PIN, WatchService & Telemetry)";
+    private static final double DEFAULT_WIDTH = 1220;
+    private static final double DEFAULT_HEIGHT = 760;
 
     private static boolean darkThemeActive = false;
 

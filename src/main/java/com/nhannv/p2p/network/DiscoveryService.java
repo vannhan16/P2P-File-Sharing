@@ -265,19 +265,23 @@ public final class DiscoveryService implements AutoCloseable {
 
     /**
      * Kết nối thử tới {@code candidateIp:tcpPort} để xác thực Peer đang chạy P2PServer
-     * và lấy tên máy chính xác (dùng cho nút "Kết nối" trực tiếp qua IP Radmin VPN).
+     * và lấy tên máy chính xác (hỗ trợ cả {@code host:port} cho Ngrok/Playit.gg và cờ {@code pinProtected}).
      */
     public Peer connectAndVerifyPeerTcp(String candidateIp, int tcpPort, int timeoutMs) {
         if (candidateIp == null || candidateIp.isBlank()) {
             return null;
         }
-        String cleanIp = candidateIp.trim();
+        Peer.HostPort hp = Peer.parseHostPort(candidateIp.trim(), tcpPort);
+        String cleanHost = hp.host();
+        int actualPort = hp.port();
+
         try (Socket socket = new Socket()) {
-            socket.connect(new InetSocketAddress(cleanIp, tcpPort), timeoutMs);
-            socket.setSoTimeout(2_500);
+            socket.connect(new InetSocketAddress(cleanHost, actualPort), timeoutMs);
+            socket.setSoTimeout(3_000);
             socket.setTcpNoDelay(true);
 
-            String remoteHostName = cleanIp;
+            String remoteHostName = cleanHost;
+            boolean pinProtected = false;
             try (DataOutputStream dos = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream()));
                  DataInputStream dis = new DataInputStream(new BufferedInputStream(socket.getInputStream()))) {
 
@@ -289,13 +293,17 @@ public final class DiscoveryService implements AutoCloseable {
                 if (replyHost != null && !replyHost.isBlank()) {
                     remoteHostName = replyHost.trim();
                 }
+                if (dis.available() > 0) {
+                    pinProtected = dis.readBoolean();
+                }
             } catch (IOException ignored) {
-                remoteHostName = "Peer-" + cleanIp;
+                remoteHostName = "Peer-" + cleanHost;
             }
 
-            Peer verifiedPeer = new Peer(cleanIp, remoteHostName, System.currentTimeMillis());
-            Peer previous = knownPeers.put(cleanIp, verifiedPeer);
-            if (previous == null || !previous.hostName().equals(remoteHostName)) {
+            Peer verifiedPeer = new Peer(cleanHost, actualPort, remoteHostName, System.currentTimeMillis(), pinProtected);
+            String peerKey = verifiedPeer.endpoint();
+            Peer previous = knownPeers.put(peerKey, verifiedPeer);
+            if (previous == null || !previous.hostName().equals(remoteHostName) || previous.pinProtected() != pinProtected) {
                 notifyPeerDiscovered(verifiedPeer);
             }
             return verifiedPeer;

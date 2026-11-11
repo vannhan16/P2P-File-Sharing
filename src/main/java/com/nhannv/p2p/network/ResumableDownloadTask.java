@@ -1,6 +1,8 @@
 package com.nhannv.p2p.network;
 
+import com.nhannv.p2p.model.Peer;
 import com.nhannv.p2p.model.SharedFile;
+import com.nhannv.p2p.model.TransferHistoryItem;
 import com.nhannv.p2p.util.HashUtil;
 import javafx.concurrent.Task;
 
@@ -16,81 +18,63 @@ import java.net.Socket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.function.Consumer;
+import java.util.function.DoubleConsumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * Tác vụ tải tệp hỗ trợ <b>Tạm dừng / Tiếp tục (Pause / Resume)</b> dựa trên tệp tạm {@code .part}
- * và lệnh {@code DOWNLOAD_CHUNK} kèm {@link RandomAccessFile#seek(long)}.
- *
- * <h2>Giải thích Cơ chế Pause / Resume cho vấn đáp đồ án (Huỳnh Nhân Danh)</h2>
- * <ol>
- *   <li><b>Tệp tạm {@code <fileName>.part}:</b>
- *       Khi bắt đầu tải {@code video.mp4}, dữ liệu chưa hoàn chỉnh được ghi vào
- *       {@code Downloads/video.mp4.part}. Nếu rớt mạng hoặc người dùng bấm nút <b>"Tạm dừng (Pause)"</b>,
- *       file {@code .part} này được giữ nguyên trên ổ cứng.</li>
- *   <li><b>Phát hiện điểm nối tiếp ({@code existingBytes}) và {@code RandomAccessFile.seek()}:</b>
- *       Khi bấm <b>"Tiếp tục (Resume)"</b>:
- *       <ul>
- *         <li>Kiểm tra kích thước hiện có của tệp tạm: {@code existingBytes = partFile.length()}.</li>
- *         <li>Gửi lệnh {@code "DOWNLOAD_CHUNK"} tới Peer với:
- *             {@code startOffset = existingBytes} và {@code length = totalSize - existingBytes}.</li>
- *         <li>Mở {@code new RandomAccessFile(partFile, "rw")} và gọi {@code raf.seek(existingBytes)}
- *             để đặt con trỏ ghi nối tiếp ngay tại đuôi file {@code .part} mà không làm mất dữ liệu cũ!</li>
- *       </ul>
- *   </li>
- *   <li><b>Cờ {@code volatile boolean isPaused}:</b>
- *       Biến {@code isPaused} được đánh dấu {@code volatile} để khi luồng UI gọi {@link #pauseDownload()},
- *       luồng tải nền nhìn thấy giá trị {@code true} ngay lập tức ở vòng lặp đọc chunk kế tiếp,
- *       đóng file {@code .part} an toàn và dừng lại.</li>
- *   <li><b>Hoàn tất & Xác thực SHA-256:</b>
- *       Khi {@code partFile.length() == totalSize} (đạt 100%), toàn bộ file {@code .part} được băm
- *       SHA-256 bằng {@link HashUtil#calculateSHA256(File)}. Nếu khớp với mã SHA-256 gốc của người gửi,
- *       đổi tên {@code <fileName>.part} thành {@code <fileName>} hoàn chỉnh.</li>
- * </ol>
+ * Tác vụ tải tệp hỗ trợ <b>Pause / Resume</b> dựa trên tệp tạm {@code .part},
+ * hỗ trợ kết nối <b>Host:Port (Ngrok/Playit)</b> và xác thực <b>Security PIN (4 số)</b>.
  */
 public class ResumableDownloadTask extends Task<Boolean> {
 
     private static final Logger LOG = Logger.getLogger(ResumableDownloadTask.class.getName());
+    private static final DateTimeFormatter HISTORY_TIME_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     private static final int CHUNK_BUFFER_SIZE = 64 * 1024;
     private static final int CONNECT_TIMEOUT_MS = 5_000;
     private static final int READ_TIMEOUT_MS = 15_000;
 
     private final SharedFile targetFile;
-    private final String targetIp;
+    private final String targetHost;
     private final int targetPort;
+    private final String authPin;
     private final Path downloadDirectory;
     private final Consumer<String> eventLogger;
+    private final DoubleConsumer speedSampleCallback;
+    private final Consumer<TransferHistoryItem> historyCallback;
 
-    /**
-     * Cờ volatile điều khiển tạm dừng từ luồng giao diện.
-     * Từ khóa {@code volatile} đảm bảo tính nhìn thấy (visibility) tức thời giữa UI Thread và Worker Thread.
-     */
     private volatile boolean isPaused = false;
     private volatile boolean isCanceledByUser = false;
 
-    public ResumableDownloadTask(SharedFile targetFile, String targetIp, Consumer<String> eventLogger) {
-        this(targetFile, targetIp, P2PServer.DEFAULT_PORT, eventLogger);
+    public ResumableDownloadTask(SharedFile targetFile, String targetEndpoint, Consumer<String> eventLogger) {
+        this(targetFile, targetEndpoint, "", eventLogger, null, null);
     }
 
     public ResumableDownloadTask(
             SharedFile targetFile,
-            String targetIp,
-            int targetPort,
-            Consumer<String> eventLogger
+            String targetEndpoint,
+            String authPin,
+            Consumer<String> eventLogger,
+            DoubleConsumer speedSampleCallback,
+            Consumer<TransferHistoryItem> historyCallback
     ) {
         this.targetFile = Objects.requireNonNull(targetFile, "targetFile");
-        this.targetIp = Objects.requireNonNull(targetIp, "targetIp");
-        this.targetPort = targetPort;
+        Peer.HostPort hp = Peer.parseHostPort(targetEndpoint, P2PServer.DEFAULT_PORT);
+        this.targetHost = hp.host();
+        this.targetPort = hp.port();
+        this.authPin = (authPin == null) ? "" : authPin.trim();
         this.downloadDirectory = Path.of(P2PServer.DOWNLOADS_DIR_NAME).toAbsolutePath();
         this.eventLogger = eventLogger;
+        this.speedSampleCallback = speedSampleCallback;
+        this.historyCallback = historyCallback;
     }
 
-    /** Tạm dừng phiên tải hiện tại mà KHÔNG xóa tệp {@code .part}. */
     public void pauseDownload() {
         this.isPaused = true;
     }
@@ -99,7 +83,6 @@ public class ResumableDownloadTask extends Task<Boolean> {
         return isPaused;
     }
 
-    /** Hủy hẳn phiên tải và xóa tệp {@code .part} trên ổ cứng. */
     public void cancelAndDeletePart() {
         this.isCanceledByUser = true;
         this.isPaused = false;
@@ -116,14 +99,15 @@ public class ResumableDownloadTask extends Task<Boolean> {
         String safeFileName = Path.of(targetFile.fileName()).getFileName().toString();
         File partFile = getPartFilePath().toFile();
         long expectedTotalSize = targetFile.fileSize();
+        String endpointStr = targetPort == P2PServer.DEFAULT_PORT ? targetHost : (targetHost + ":" + targetPort);
+        long startNanoOverall = System.nanoTime();
+        long sessionBytesRead = 0L;
 
         try {
             Files.createDirectories(downloadDirectory);
 
-            // Bước 1: Kiểm tra tệp <fileName>.part đã tồn tại từ lần tải bị gián đoạn trước chưa.
             long existingBytes = partFile.exists() ? partFile.length() : 0L;
             if (existingBytes > expectedTotalSize && expectedTotalSize > 0) {
-                // Nếu file .part lớn bất thường so với kích thước gốc -> đặt lại về 0.
                 Files.deleteIfExists(partFile.toPath());
                 existingBytes = 0L;
             }
@@ -136,16 +120,15 @@ public class ResumableDownloadTask extends Task<Boolean> {
             } else if (existingBytes == 0) {
                 logEvent(String.format(Locale.US,
                         "Bắt đầu tải \"%s\" (%s) từ Peer %s...",
-                        safeFileName, targetFile.formattedSize(), targetIp));
+                        safeFileName, targetFile.formattedSize(), endpointStr));
             }
 
             long bytesRemainingToRequest = Math.max(expectedTotalSize - existingBytes, 0L);
-
-            // Nếu file .part chưa tải đủ 100% thì kết nối tới Peer gửi lệnh DOWNLOAD_CHUNK.
             String serverSha256 = targetFile.sha256Hash();
+
             if (bytesRemainingToRequest > 0 || expectedTotalSize == 0) {
                 try (Socket socket = new Socket()) {
-                    socket.connect(new InetSocketAddress(targetIp, targetPort), CONNECT_TIMEOUT_MS);
+                    socket.connect(new InetSocketAddress(targetHost, targetPort), CONNECT_TIMEOUT_MS);
                     socket.setSoTimeout(READ_TIMEOUT_MS);
                     socket.setTcpNoDelay(true);
 
@@ -154,41 +137,48 @@ public class ResumableDownloadTask extends Task<Boolean> {
                          DataInputStream dis = new DataInputStream(
                                  new BufferedInputStream(socket.getInputStream(), CHUNK_BUFFER_SIZE))) {
 
-                        // Bước 2: Gửi yêu cầu DOWNLOAD_CHUNK với startOffset = existingBytes.
+                        // Gửi yêu cầu DOWNLOAD_CHUNK kèm startOffset, length và mã PIN xác thực.
                         dos.writeUTF(P2PServer.CMD_DOWNLOAD_CHUNK);
                         dos.writeUTF(safeFileName);
                         dos.writeLong(existingBytes);
                         dos.writeLong(bytesRemainingToRequest);
+                        dos.writeUTF(authPin);
                         dos.flush();
 
                         long remoteTotalSize = dis.readLong();
-                        if (remoteTotalSize < 0) {
+                        if (remoteTotalSize == P2PServer.CODE_AUTH_FAILED) {
+                            String authStatus = dis.readUTF();
                             updateProgress(0.0, 1.0);
-                            updateMessage("Lỗi: Tệp \"" + safeFileName + "\" không tồn tại trên Peer " + targetIp);
-                            logEvent("Lỗi: Peer " + targetIp + " báo không tìm thấy tệp \"" + safeFileName + "\"");
+                            String msg = "Từ chối truy cập (" + authStatus + "): Sai mã PIN bảo mật của Peer " + endpointStr + "!";
+                            updateMessage("Trạng thái: " + msg);
+                            logEvent(msg);
+                            recordHistory(safeFileName, expectedTotalSize, endpointStr, 0.0, 1L, "Lỗi: Sai mã PIN (AUTH_FAILED)");
                             return false;
                         }
+                        if (remoteTotalSize < 0) {
+                            updateProgress(0.0, 1.0);
+                            updateMessage("Lỗi: Tệp \"" + safeFileName + "\" không tồn tại trên Peer " + endpointStr);
+                            logEvent("Lỗi: Peer " + endpointStr + " báo không tìm thấy tệp \"" + safeFileName + "\"");
+                            return false;
+                        }
+
                         long chunkLengthToRead = dis.readLong();
                         String remoteSha = dis.readUTF();
                         if (serverSha256 == null || serverSha256.isBlank()) {
                             serverSha256 = remoteSha;
                         }
 
-                        // Bước 3: Mở RandomAccessFile ở chế độ "rw" và dùng seek(existingBytes)
-                        // để ghi nối tiếp dữ liệu vào đúng đuôi của file .part.
                         byte[] buffer = new byte[CHUNK_BUFFER_SIZE];
                         long currentTotalDownloaded = existingBytes;
-                        long sessionBytesRead = 0L;
                         long sessionStartNano = System.nanoTime();
 
                         try (RandomAccessFile raf = new RandomAccessFile(partFile, "rw")) {
-                            // Di chuyển con trỏ ghi đến đúng vị trí byte đã tải được trước đó.
                             raf.seek(existingBytes);
 
                             long remaining = chunkLengthToRead;
                             while (remaining > 0) {
-                                // Kiểm tra nếu người dùng bấm nút "Tạm dừng (Pause)" hoặc "Hủy (Cancel)".
                                 if (isPaused) {
+                                    reportSpeed(0.0);
                                     double pct = remoteTotalSize > 0
                                             ? (currentTotalDownloaded * 100.0) / remoteTotalSize : 0.0;
                                     String pauseMsg = String.format(Locale.US,
@@ -203,6 +193,7 @@ public class ResumableDownloadTask extends Task<Boolean> {
                                 }
 
                                 if (isCanceledByUser || isCancelled()) {
+                                    reportSpeed(0.0);
                                     raf.close();
                                     Files.deleteIfExists(partFile.toPath());
                                     updateProgress(0.0, 1.0);
@@ -217,7 +208,6 @@ public class ResumableDownloadTask extends Task<Boolean> {
                                     break;
                                 }
 
-                                // Ghi khối dữ liệu vừa nhận vào vị trí hiện tại của RandomAccessFile.
                                 raf.write(buffer, 0, read);
 
                                 currentTotalDownloaded += read;
@@ -225,6 +215,7 @@ public class ResumableDownloadTask extends Task<Boolean> {
                                 remaining -= read;
 
                                 double speedMBps = calculateSpeedMBps(sessionBytesRead, sessionStartNano);
+                                reportSpeed(speedMBps);
                                 int pct = remoteTotalSize > 0
                                         ? (int) ((currentTotalDownloaded * 100) / remoteTotalSize) : 100;
                                 updateProgress(currentTotalDownloaded, Math.max(remoteTotalSize, 1));
@@ -235,6 +226,7 @@ public class ResumableDownloadTask extends Task<Boolean> {
                         }
 
                         if (currentTotalDownloaded < remoteTotalSize) {
+                            reportSpeed(0.0);
                             double pct = (currentTotalDownloaded * 100.0) / remoteTotalSize;
                             String msg = String.format(Locale.US,
                                     "Gián đoạn kết nối tại %.1f%% (offset=%d). Bấm 'Tiếp tục (Resume)' để tải tiếp!",
@@ -247,9 +239,11 @@ public class ResumableDownloadTask extends Task<Boolean> {
                 }
             }
 
-            // Bước 4: Đã tải đủ 100% số byte -> Băm SHA-256 toàn bộ file .part để xác thực toàn vẹn.
+            reportSpeed(0.0);
             updateMessage("Đang kiểm tra mã băm SHA-256 cho tệp " + partFile.getName() + "...");
             String actualSha256 = HashUtil.calculateSHA256(partFile);
+            long durationMs = Math.max(1L, (System.nanoTime() - startNanoOverall) / 1_000_000L);
+            double avgSpeed = calculateSpeedMBps(Math.max(sessionBytesRead, expectedTotalSize), startNanoOverall);
 
             if (serverSha256 != null && !serverSha256.isBlank()
                     && !actualSha256.equalsIgnoreCase(serverSha256)) {
@@ -259,10 +253,10 @@ public class ResumableDownloadTask extends Task<Boolean> {
                 updateMessage(err);
                 logEvent(err + " [Mong đợi: " + HashUtil.shortHash(serverSha256)
                         + ", Thực tế: " + HashUtil.shortHash(actualSha256) + "]");
+                recordHistory(safeFileName, expectedTotalSize, endpointStr, avgSpeed, durationMs, "Lỗi SHA-256");
                 return false;
             }
 
-            // Bước 5: SHA-256 hợp lệ -> Đổi tên <fileName>.part thành <fileName> hoàn chỉnh!
             File finalFile = P2PServer.resolveOutputFile(downloadDirectory, safeFileName);
             Files.move(partFile.toPath(), finalFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
 
@@ -271,9 +265,12 @@ public class ResumableDownloadTask extends Task<Boolean> {
                     + "] -> " + finalFile.getName();
             updateMessage(okMsg);
             logEvent(okMsg);
+            recordHistory(finalFile.getName(), expectedTotalSize, endpointStr, avgSpeed, durationMs,
+                    "Hợp lệ [" + HashUtil.shortHash(actualSha256) + "]");
             return true;
 
         } catch (IOException e) {
+            reportSpeed(0.0);
             if (isPaused) {
                 logEvent("Đã tạm dừng tải \"" + safeFileName + "\" tại offset " + partFile.length());
                 return false;
@@ -291,6 +288,34 @@ public class ResumableDownloadTask extends Task<Boolean> {
             updateMessage("Trạng thái: " + errMsg);
             logEvent(errMsg);
             return false;
+        }
+    }
+
+    private void reportSpeed(double speedMBps) {
+        if (speedSampleCallback != null) {
+            speedSampleCallback.accept(speedMBps);
+        }
+    }
+
+    private void recordHistory(
+            String fileName,
+            long sizeBytes,
+            String peerEndpoint,
+            double avgSpeedMBps,
+            long durationMs,
+            String shaStatus
+    ) {
+        if (historyCallback != null) {
+            historyCallback.accept(new TransferHistoryItem(
+                    LocalDateTime.now().format(HISTORY_TIME_FMT),
+                    fileName,
+                    sizeBytes,
+                    peerEndpoint,
+                    "Nhận (Pull/Resume)",
+                    avgSpeedMBps,
+                    durationMs,
+                    shaStatus
+            ));
         }
     }
 

@@ -1,6 +1,7 @@
 package com.nhannv.p2p.network;
 
 import com.nhannv.p2p.model.SharedFile;
+import com.nhannv.p2p.model.TransferHistoryItem;
 import javafx.concurrent.Task;
 
 import java.io.IOException;
@@ -9,28 +10,23 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.Consumer;
+import java.util.function.DoubleConsumer;
+import java.util.function.Supplier;
 
 /**
- * Trình điều phối tải tệp trung tâm (Download Manager) cho Milestone 4.
- *
- * <h2>Vai trò kiến trúc</h2>
- * <ul>
- *   <li>Tự động phân tích số lượng Peer đang giữ tệp có cùng mã {@code sha256Hash}:
- *     <ul>
- *       <li>Nếu <b>{@code N > 1} Peers</b>: Khởi chạy {@link SwarmDownloadTask} (Tải đa nguồn song song).</li>
- *       <li>Nếu <b>{@code 1} Peer</b>: Khởi chạy {@link ResumableDownloadTask} (Tải đơn nguồn có hỗ trợ Pause/Resume).</li>
- *     </ul>
- *   </li>
- *   <li>Quản lý vòng đời <b>Tạm dừng (Pause)</b>, <b>Tiếp tục (Resume)</b> và <b>Hủy (Cancel)</b>
- *       cho phiên tải hiện hành mà tầng UI không cần chạm vào chi tiết Socket hay file {@code .part}.</li>
- * </ul>
+ * Trình điều phối tải tệp trung tâm (Download Manager) nâng cấp cho Milestone 5:
+ * Hỗ trợ kết nối {@code host:port} (Ngrok/Playit), truyền mã PIN bảo mật 4 chữ số,
+ * đo tốc độ cho biểu đồ {@code AreaChart} và ghi nhận lịch sử {@link TransferHistoryItem}.
  */
 public class DownloadManager {
 
     private final Consumer<String> eventLogger;
+    private DoubleConsumer speedSampleCallback;
+    private Consumer<TransferHistoryItem> historyCallback;
+    private Supplier<String> authPinSupplier = () -> "";
 
     private SharedFile lastRequestedFile;
-    private List<String> lastTargetIps;
+    private List<String> lastTargetEndpoints;
     private long[] savedSwarmPartProgress;
 
     private ResumableDownloadTask activeResumableTask;
@@ -40,29 +36,33 @@ public class DownloadManager {
         this.eventLogger = eventLogger;
     }
 
-    /**
-     * Bắt đầu tải mới (hoặc tiếp tục tải nếu phát hiện tệp {@code .part} sẵn có) cho một {@link SharedFile}.
-     *
-     * @param sharedFile tệp được chọn trên bảng
-     * @return {@link Task} tải tệp để {@code MainController} bind vào {@code ProgressBar} và {@code Label}
-     */
+    public void setSpeedSampleCallback(DoubleConsumer speedSampleCallback) {
+        this.speedSampleCallback = speedSampleCallback;
+    }
+
+    public void setHistoryCallback(Consumer<TransferHistoryItem> historyCallback) {
+        this.historyCallback = historyCallback;
+    }
+
+    public void setAuthPinSupplier(Supplier<String> authPinSupplier) {
+        if (authPinSupplier != null) {
+            this.authPinSupplier = authPinSupplier;
+        }
+    }
+
     public synchronized Task<Boolean> startDownload(SharedFile sharedFile) {
         Objects.requireNonNull(sharedFile, "sharedFile");
 
-        // Nếu đang chuyển sang tải một tệp khác, đặt lại tiến độ Swarm cũ.
         if (lastRequestedFile == null || !lastRequestedFile.sha256Hash().equals(sharedFile.sha256Hash())) {
             savedSwarmPartProgress = null;
         }
 
         this.lastRequestedFile = sharedFile;
-        this.lastTargetIps = sharedFile.resolvedTargetIps();
+        this.lastTargetEndpoints = sharedFile.resolvedTargetIps();
 
         return launchTaskInternal();
     }
 
-    /**
-     * Tạm dừng (Pause) phiên tải đang chạy, bảo toàn nguyên vẹn tệp {@code <fileName>.part}.
-     */
     public synchronized boolean pauseCurrentDownload() {
         if (activeResumableTask != null && activeResumableTask.isRunning()) {
             activeResumableTask.pauseDownload();
@@ -76,11 +76,8 @@ public class DownloadManager {
         return false;
     }
 
-    /**
-     * Tiếp tục (Resume) phiên tải đã tạm dừng hoặc bị ngắt kết nối giữa chừng.
-     */
     public synchronized Task<Boolean> resumeCurrentDownload() {
-        if (lastRequestedFile == null || lastTargetIps == null || lastTargetIps.isEmpty()) {
+        if (lastRequestedFile == null || lastTargetEndpoints == null || lastTargetEndpoints.isEmpty()) {
             return null;
         }
         if (isDownloading()) {
@@ -89,9 +86,6 @@ public class DownloadManager {
         return launchTaskInternal();
     }
 
-    /**
-     * Hủy hẳn phiên tải hiện tại và xóa sạch tệp tạm {@code <fileName>.part} trên ổ cứng.
-     */
     public synchronized void cancelCurrentDownload() {
         if (activeResumableTask != null) {
             Path partPath = activeResumableTask.getPartFilePath();
@@ -131,13 +125,17 @@ public class DownloadManager {
     }
 
     private Task<Boolean> launchTaskInternal() {
-        if (lastTargetIps.size() > 1) {
+        String currentPin = authPinSupplier.get();
+        if (lastTargetEndpoints.size() > 1) {
             activeResumableTask = null;
             activeSwarmTask = new SwarmDownloadTask(
                     lastRequestedFile,
-                    lastTargetIps,
+                    lastTargetEndpoints,
+                    currentPin,
                     savedSwarmPartProgress,
-                    eventLogger
+                    eventLogger,
+                    speedSampleCallback,
+                    historyCallback
             );
             activeSwarmTask.valueProperty().addListener((obs, oldVal, completedOk) -> {
                 if (Boolean.TRUE.equals(completedOk)) {
@@ -152,8 +150,15 @@ public class DownloadManager {
             return activeSwarmTask;
         } else {
             activeSwarmTask = null;
-            String targetIp = lastTargetIps.get(0);
-            activeResumableTask = new ResumableDownloadTask(lastRequestedFile, targetIp, eventLogger);
+            String targetEndpoint = lastTargetEndpoints.get(0);
+            activeResumableTask = new ResumableDownloadTask(
+                    lastRequestedFile,
+                    targetEndpoint,
+                    currentPin,
+                    eventLogger,
+                    speedSampleCallback,
+                    historyCallback
+            );
             Thread t = new Thread(activeResumableTask, "p2p-resumable-downloader");
             t.setDaemon(true);
             t.start();
@@ -166,7 +171,6 @@ public class DownloadManager {
             try {
                 Files.deleteIfExists(path);
             } catch (IOException ignored) {
-                // Bỏ qua nếu file đang được đóng.
             }
         }
     }
