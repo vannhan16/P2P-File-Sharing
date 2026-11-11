@@ -1,7 +1,14 @@
+# Maven build output
 target/
-Downloads/
-Shared/
+
+# Runtime test files in Downloads and Shared folders (keep .gitkeep only)
+Downloads/*
+!Downloads/.gitkeep
+Shared/*
+!Shared/.gitkeep
 *.part
+
+# Maven wrapper
 !.mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/
@@ -11,6 +18,7 @@ Shared/
 *.iws
 *.iml
 *.ipr
+out/
 
 ### Eclipse ###
 .apt_generated
@@ -28,11 +36,10 @@ Shared/
 /nbdist/
 /.nb-gradle/
 build/
-!**/src/main/**/build/
-!**/src/test/**/build/
 
 ### VS Code ###
 .vscode/
 
-### Mac OS ###
+### OS Generated ###
 .DS_Store
+Thumbs.db
