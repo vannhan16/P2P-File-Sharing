@@ -13,26 +13,14 @@ import java.util.logging.Logger;
 
 /**
  * Tiện ích tự động kiểm tra và thêm Rule vào <b>Windows Defender Firewall</b>
- * để các máy thật trong mạng LAN thấy nhau và truyền tệp mà <b>KHÔNG CẦN tắt Firewall</b>.
+ * để các máy thật trong mạng LAN nội bộ và <b>Radmin VPN (26.x.x.x)</b> thấy nhau,
+ * truyền tệp mà <b>KHÔNG CẦN tắt Firewall</b>.
  *
- * <h2>Giải thích Cơ chế mở Firewall 1-Click cho vấn đáp đồ án (Huỳnh Nhân Danh)</h2>
- * <ol>
- *   <li><b>Vấn đề thực tế trên Windows:</b>
- *       Mặc định Windows Firewall (đặc biệt khi mạng Wi-Fi bị đặt ở chế độ <i>Public Network</i>)
- *       sẽ chặn toàn bộ gói tin <b>Inbound</b> tới cổng UDP {@code 8888} (Discovery) và TCP {@code 8889}
- *       (Truyền tệp), hoặc chặn tiến trình {@code java.exe}.</li>
- *   <li><b>Giải pháp chuẩn kỹ sư (Không tắt Firewall):</b>
- *       Thay vì yêu cầu người dùng tắt cả hệ thống tường lửa gây mất an toàn, ta chỉ mở đúng
- *       cổng UDP {@code 8888} và TCP {@code 8889} cho cả 2 chiều <b>Inbound ({@code dir=in})</b>
- *       và <b>Outbound ({@code dir=out})</b> (kèm quyền cho tiến trình {@code java.exe} hiện hành)
- *       bằng công cụ hệ thống {@code netsh advfirewall firewall add rule}.</li>
- *   <li><b>Nâng quyền Admin (UAC Elevation) qua PowerShell:</b>
- *       Vì lệnh {@code netsh advfirewall} yêu cầu quyền Administrator, hàm
- *       {@link #configureFirewallRulesWithUac(int, int)} gọi:
- *       <pre>PowerShell Start-Process cmd -ArgumentList '/c netsh ...' -Verb RunAs -Wait</pre>
- *       Windows sẽ bật hộp thoại <b>UAC (Yes/No)</b> chuẩn của hệ điều hành. Ngay khi người dùng bấm
- *       <b>Yes</b>, toàn bộ Rule Inbound/Outbound cho UDP 8888 &amp; TCP 8889 được tạo tự động.</li>
- * </ol>
+ * <h2>Đảm bảo tương thích Radmin VPN ({@code profile=any})</h2>
+ * Khi cài đặt Radmin VPN, Windows thường xếp card mạng ảo <i>Famatech Radmin VPN Ethernet Adapter</i>
+ * vào nhóm <b>Unidentified Network (Public Profile)</b>. Vì vậy mọi lệnh {@code netsh advfirewall}
+ * bên dưới đều bắt buộc có tham số {@code profile=any} (áp dụng cho cả <i>Domain, Private và Public</i>)
+ * kèm quyền cho tiến trình {@code java.exe} ở cả chiều Inbound và Outbound.
  */
 public final class FirewallUtil {
 
@@ -44,6 +32,7 @@ public final class FirewallUtil {
     private static final String RULE_TCP_IN = RULE_PREFIX + "_TCP_IN";
     private static final String RULE_TCP_OUT = RULE_PREFIX + "_TCP_OUT";
     private static final String RULE_JAVA_APP_IN = RULE_PREFIX + "_JAVA_APP_IN";
+    private static final String RULE_JAVA_APP_OUT = RULE_PREFIX + "_JAVA_APP_OUT";
 
     private FirewallUtil() {
     }
@@ -56,7 +45,6 @@ public final class FirewallUtil {
 
     /**
      * Kiểm tra xem Rule Firewall của ứng dụng P2P đã được thêm vào Windows Firewall trước đó chưa.
-     * (Lệnh {@code show rule} không cần quyền Admin).
      */
     public static boolean isFirewallRuleConfigured() {
         if (!isWindows()) {
@@ -80,7 +68,8 @@ public final class FirewallUtil {
 
     /**
      * Mở hộp thoại UAC (Run as Administrator) để tự động thêm bộ Rule Inbound &amp; Outbound
-     * cho cổng UDP Discovery (8888), cổng TCP Transfer (8889) và tiến trình {@code java.exe} hiện tại.
+     * với {@code profile=any} (Domain, Private, Public - bao gồm card Radmin VPN)
+     * cho cổng UDP Discovery (8888), cổng TCP Transfer (8889) và tiến trình {@code java.exe}.
      *
      * @param udpPort cổng UDP Discovery (mặc định 8888)
      * @param tcpPort cổng TCP P2P Server (mặc định 8889)
@@ -92,16 +81,13 @@ public final class FirewallUtil {
             return true;
         }
 
-        // Xây dựng chuỗi lệnh netsh:
-        // 1. Xóa các rule cũ cùng tên (nếu có) để tránh nhân bản trùng lặp.
-        // 2. Thêm 4 rule cho cổng UDP (in/out) và TCP (in/out) trên mọi profile (Private, Public, Domain).
-        // 3. Thêm rule cho chính thực thi java.exe hiện tại để tránh bị rule mặc định "Block Java" của Windows chặn.
         StringBuilder cmdChain = new StringBuilder();
         cmdChain.append(deleteRuleCmd(RULE_UDP_IN)).append(" & ")
                 .append(deleteRuleCmd(RULE_UDP_OUT)).append(" & ")
                 .append(deleteRuleCmd(RULE_TCP_IN)).append(" & ")
                 .append(deleteRuleCmd(RULE_TCP_OUT)).append(" & ")
                 .append(deleteRuleCmd(RULE_JAVA_APP_IN)).append(" & ")
+                .append(deleteRuleCmd(RULE_JAVA_APP_OUT)).append(" & ")
                 .append(addPortRuleCmd(RULE_UDP_IN, "in", "UDP", udpPort)).append(" & ")
                 .append(addPortRuleCmd(RULE_UDP_OUT, "out", "UDP", udpPort)).append(" & ")
                 .append(addPortRuleCmd(RULE_TCP_IN, "in", "TCP", tcpPort)).append(" & ")
@@ -113,11 +99,13 @@ public final class FirewallUtil {
             cmdChain.append(" & ")
                     .append(String.format(Locale.US,
                             "netsh advfirewall firewall add rule name=\"%s\" dir=in action=allow program=\"%s\" enable=yes profile=any",
-                            RULE_JAVA_APP_IN, javaPath));
+                            RULE_JAVA_APP_IN, javaPath))
+                    .append(" & ")
+                    .append(String.format(Locale.US,
+                            "netsh advfirewall firewall add rule name=\"%s\" dir=out action=allow program=\"%s\" enable=yes profile=any",
+                            RULE_JAVA_APP_OUT, javaPath));
         }
 
-        // Dùng PowerShell Start-Process cmd -ArgumentList '/c ...' -Verb RunAs -Wait
-        // để kích hoạt cửa sổ UAC xin quyền Administrator.
         String argumentList = "/c " + cmdChain;
         String escapedForSingleQuote = argumentList.replace("'", "''");
         String psCommand = "Start-Process cmd -ArgumentList '" + escapedForSingleQuote + "' -Verb RunAs -Wait -WindowStyle Hidden";
@@ -138,7 +126,7 @@ public final class FirewallUtil {
             try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                 while (reader.readLine() != null) {
-                    // Đọc hết output để tránh treo buffer tiến trình con.
+                    // Đọc hết output của tiến trình con.
                 }
             }
 
@@ -148,7 +136,6 @@ public final class FirewallUtil {
                 return false;
             }
 
-            // Kiểm tra lại xem rule đã thực sự xuất hiện trong Windows Firewall chưa.
             return isFirewallRuleConfigured();
         } catch (IOException | InterruptedException e) {
             if (e instanceof InterruptedException) {
@@ -167,7 +154,7 @@ public final class FirewallUtil {
 
     private static String addPortRuleCmd(String ruleName, String direction, String protocol, int port) {
         return String.format(Locale.US,
-                "netsh advfirewall firewall add rule name=\"%s\" dir=%s action=allow protocol=%s localport=%d profile=any",
+                "netsh advfirewall firewall add rule name=\"%s\" dir=%s action=allow protocol=%s localport=%d profile=any interfacetype=any",
                 ruleName, direction, protocol, port);
     }
 }

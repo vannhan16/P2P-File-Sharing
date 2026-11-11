@@ -47,21 +47,23 @@ import java.util.Map;
  *
  * <h2>Các tính năng nổi bật (Thuyết trình &amp; Vấn đáp đồ án)</h2>
  * <ul>
- *   <li><b>Directed Subnet UDP Broadcast &amp; TCP Active Subnet Scan:</b>
- *       Tự động lọc bỏ các card mạng ảo (VMware, VirtualBox, WSL, Hyper-V, VPN...) để gửi gói UDP
- *       Broadcast ra đúng card Wi-Fi/LAN thật, kèm nút <b>"Quét sâu mạng LAN"</b> (50 luồng TCP)
- *       để tìm thấy nhau ngay cả khi Router Wi-Fi chặn UDP Broadcast.</li>
- *   <li><b>Cấu hình Windows Firewall 1-Click (Không cần tắt Firewall):</b>
- *       Nút <b>"Cấu hình Firewall (1-Click)"</b> bật hộp thoại UAC của Windows để tự động mở đúng
- *       cổng UDP 8888 và TCP 8889 (Inbound &amp; Outbound).</li>
+ *   <li><b>Hỗ trợ Radmin VPN ({@code 26.x.x.x}) &amp; Kết nối trực tiếp qua IP:</b>
+ *       Hiển thị rõ cả <b>IP LAN nội bộ</b> và <b>IP Radmin VPN</b> ngay trên thanh tiêu đề.
+ *       Người dùng có thể nhập trực tiếp IP Radmin của bạn cùng nhóm và bấm <b>"Kết nối"</b>
+ *       để gửi gói UDP Direct Ping + kết nối TCP {@code LIST_FILES} xuyên qua mạng ảo.</li>
+ *   <li><b>Cấu hình Windows Firewall 1-Click ({@code profile=any}):</b>
+ *       Tự động mở cổng UDP 8888 và TCP 8889 cho cả Domain, Private và Public network (bao gồm card Radmin VPN).</li>
  *   <li><b>Gộp nguồn Swarm theo SHA-256 &amp; Pause/Resume/Cancel:</b>
- *       Hỗ trợ tải đa nguồn song song từ nhiều Peer hoặc tạm dừng/tiếp tục từ tệp {@code .part}.</li>
+ *       Tải đa nguồn song song từ nhiều Peer hoặc tạm dừng/tiếp tục từ tệp {@code .part}.</li>
  * </ul>
  */
 public class MainController implements PeerDiscoveryListener {
 
     private static final String STATUS_PREFIX = "Trạng thái: ";
     private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss");
+
+    @FXML
+    private Label networkIpBadgeLabel;
 
     @FXML
     private Label sharedFolderLabel;
@@ -71,6 +73,12 @@ public class MainController implements PeerDiscoveryListener {
 
     @FXML
     private Button themeToggleButton;
+
+    @FXML
+    private TextField directIpTextField;
+
+    @FXML
+    private Button connectDirectIpButton;
 
     @FXML
     private ListView<Peer> peerListView;
@@ -132,7 +140,7 @@ public class MainController implements PeerDiscoveryListener {
     @FXML
     private ProgressBar transferProgressBar;
 
-    /** Danh sách Peer đang online trong LAN. */
+    /** Danh sách Peer đang online trong LAN / Radmin VPN. */
     private final ObservableList<Peer> peerList = FXCollections.observableArrayList();
 
     /** Danh sách tệp thô (chưa gộp) từ máy cục bộ và các Peer. */
@@ -153,7 +161,7 @@ public class MainController implements PeerDiscoveryListener {
     private void initialize() {
         // --- 1. Cột trái: Danh sách Peer đang online ---
         peerListView.setItems(peerList);
-        peerListView.setPlaceholder(new Label("Đang tìm Peer trong mạng LAN..."));
+        peerListView.setPlaceholder(new Label("Đang tìm Peer (LAN / Radmin VPN)..."));
         peerCountLabel.textProperty().bind(Bindings.size(peerList).asString("(%d)"));
 
         peerListView.getSelectionModel().selectedItemProperty().addListener((obs, oldPeer, selectedPeer) -> {
@@ -179,7 +187,8 @@ public class MainController implements PeerDiscoveryListener {
         });
 
         updateSharedFolderLabel();
-        appendNetworkLog("Khởi tạo hệ thống P2P File Sharing (AtlantaFX UI + Swarm + Pause/Resume)...");
+        refreshHeaderIpBadges();
+        appendNetworkLog("Khởi tạo hệ thống P2P File Sharing (Hỗ trợ LAN nội bộ & Radmin VPN 26.x.x.x)...");
         logDetectedPhysicalSubnets();
         checkFirewallStatusAsync();
 
@@ -191,13 +200,25 @@ public class MainController implements PeerDiscoveryListener {
         scanLocalSharedFolderAsync();
     }
 
+    /**
+     * Cập nhật nhãn hiển thị rõ cả <b>IP LAN nội bộ</b> và <b>IP Radmin VPN</b> trên thanh tiêu đề.
+     */
+    private void refreshHeaderIpBadges() {
+        String lanIp = DiscoveryService.detectLocalLanIp();
+        String radminIp = DiscoveryService.detectRadminVpnIp();
+        if (networkIpBadgeLabel != null) {
+            networkIpBadgeLabel.setText("IP LAN: " + lanIp + "   |   IP Radmin VPN: " + radminIp);
+        }
+    }
+
     private void logDetectedPhysicalSubnets() {
         List<DiscoveryService.LanSubnetTarget> subnets = DiscoveryService.collectPhysicalLanSubnets();
         if (subnets.isEmpty()) {
-            appendNetworkLog("Cảnh báo: Chưa phát hiện card mạng LAN/Wi-Fi vật lý nào đang có IPv4.");
+            appendNetworkLog("Cảnh báo: Chưa phát hiện card mạng LAN/Radmin VPN nào đang có IPv4.");
         } else {
             for (DiscoveryService.LanSubnetTarget s : subnets) {
-                appendNetworkLog("Card mạng vật lý hợp lệ: " + s.interfaceName()
+                String tag = s.isRadmin() ? "[RADMIN VPN WHITELIST]" : "[LAN VẬT LÝ]";
+                appendNetworkLog(tag + " " + s.interfaceName()
                         + " [IP=" + s.localAddress().getHostAddress()
                         + " -> Broadcast=" + s.broadcastAddress().getHostAddress() + "]");
             }
@@ -212,9 +233,9 @@ public class MainController implements PeerDiscoveryListener {
                     if (firewallConfigButton != null) {
                         firewallConfigButton.setText("Firewall: Đã mở Port (8888/8889)");
                     }
-                    appendNetworkLog("Windows Firewall: Đã có sẵn Rule cho phép UDP 8888 & TCP 8889.");
+                    appendNetworkLog("Windows Firewall: Đã có sẵn Rule (profile=any) cho phép UDP 8888 & TCP 8889.");
                 } else {
-                    appendNetworkLog("Gợi ý: Nếu 2 máy chưa thấy nhau, hãy bấm nút 'Cấu hình Firewall (1-Click)' ở góc trên!");
+                    appendNetworkLog("Gợi ý: Hãy bấm 'Cấu hình Firewall (1-Click)' ở góc trên để mở cổng cho Radmin VPN & LAN!");
                 }
             });
         }, "p2p-firewall-checker");
@@ -238,7 +259,7 @@ public class MainController implements PeerDiscoveryListener {
         try {
             discoveryService.start();
             appendNetworkLog("UDP Discovery đã mở trên cổng " + discoveryService.getPort()
-                    + " (Directed Subnet Broadcast 3s/lần, đã lọc bỏ card mạng ảo).");
+                    + " (Ưu tiên Whitelist Radmin VPN 26.x.x.x + Card LAN vật lý).");
         } catch (BindException e) {
             String msg = "Lỗi: UDP port " + discoveryService.getPort() + " đang bị chiếm!";
             setStatus(msg);
@@ -296,7 +317,7 @@ public class MainController implements PeerDiscoveryListener {
                 peerList.set(index, peer);
             } else {
                 peerList.add(peer);
-                appendNetworkLog("Phát hiện Peer mới trong mạng LAN: " + peer);
+                appendNetworkLog("Phát hiện Peer mới: " + peer);
             }
             fetchFilesFromPeersAsync(List.of(peer));
         });
@@ -321,20 +342,127 @@ public class MainController implements PeerDiscoveryListener {
     }
 
     // ------------------------------------------------------------------------------------------
-    // Sự kiện giao diện: Cấu hình Firewall 1-Click, Quét sâu mạng LAN, Theme, Shared Folder, Tải tệp
+    // TÁC VỤ 2: Kết nối trực tiếp qua IP (Radmin VPN 26.x.x.x / LAN)
     // ------------------------------------------------------------------------------------------
 
     /**
-     * Nút "Cấu hình Firewall (1-Click)":
-     * Gọi {@link FirewallUtil#configureFirewallRulesWithUac(int, int)} để bật cửa sổ UAC (Yes/No)
-     * và thêm Rule Inbound/Outbound cho cổng UDP 8888 &amp; TCP 8889 mà không cần tắt Windows Firewall.
+     * Xử lý sự kiện khi người dùng nhập IP Radmin (vd: {@code 26.x.x.x}) vào ô {@code directIpTextField}
+     * và bấm nút <b>"Kết nối"</b> (hoặc nhấn phím Enter):
+     * <ol>
+     *   <li>Gửi ngay một gói UDP Unicast {@code "PING"} qua {@link DiscoveryService#sendDirectPing(String)}.</li>
+     *   <li>Mở kết nối TCP tới {@code ip:8889}, gửi lệnh {@code "PING"} + {@code "LIST_FILES"} để xác thực
+     *       máy bạn mình đang bật ứng dụng, tự động thêm Peer vào {@code peerListView} và tải ngay
+     *       danh sách tệp chia sẻ của họ lên {@code sharedFileTable}.</li>
+     * </ol>
      */
+    @FXML
+    private void handleConnectDirectIp() {
+        String rawIp = (directIpTextField == null) ? "" : directIpTextField.getText();
+        String targetIp = (rawIp == null) ? "" : rawIp.trim();
+        if (targetIp.isEmpty()) {
+            Alert alert = new Alert(Alert.AlertType.WARNING);
+            alert.setTitle("Chưa nhập địa chỉ IP");
+            alert.setHeaderText("Vui lòng nhập địa chỉ IP Radmin VPN (vd: 26.x.x.x) hoặc IP LAN!");
+            alert.setContentText("Bạn có thể copy IPv4 của bạn mình từ cửa sổ Radmin VPN rồi dán vào ô này.");
+            alert.showAndWait();
+            return;
+        }
+
+        if (connectDirectIpButton != null) {
+            connectDirectIpButton.setDisable(true);
+        }
+        appendNetworkLog("Đang kết nối trực tiếp tới IP " + targetIp + " (UDP Direct Ping + TCP LIST_FILES)...");
+
+        Task<List<SharedFile>> connectTask = new Task<>() {
+            private Peer connectedPeer;
+
+            @Override
+            protected List<SharedFile> call() throws Exception {
+                updateProgress(-1, 1);
+                updateMessage("Trạng thái: Đang gửi Direct Ping và kết nối TCP tới " + targetIp + ":8889...");
+
+                // Bước 1: Bắn gói UDP Unicast PING tới thẳng targetIp:8888
+                if (discoveryService != null) {
+                    discoveryService.sendDirectPing(targetIp);
+                }
+
+                // Bước 2: Mở kết nối TCP tới targetIp:8889 để lấy hostname và kiểm tra máy kia đang bật app
+                if (discoveryService != null) {
+                    connectedPeer = discoveryService.connectAndVerifyPeerTcp(
+                            targetIp,
+                            P2PServer.DEFAULT_PORT,
+                            3_000
+                    );
+                }
+                if (connectedPeer == null) {
+                    connectedPeer = new Peer(targetIp, "Peer-" + targetIp, System.currentTimeMillis());
+                }
+
+                // Bước 3: Gửi lệnh LIST_FILES qua TCP để lấy toàn bộ danh sách tệp chia sẻ của Peer đó
+                List<SharedFile> files = P2PServer.requestFileListFromPeer(connectedPeer);
+
+                updateProgress(1.0, 1.0);
+                updateMessage("Trạng thái: Đã kết nối thành công tới " + connectedPeer
+                        + " (" + files.size() + " tệp chia sẻ)");
+                return files;
+            }
+        };
+
+        connectTask.setOnSucceeded(e -> {
+            if (connectDirectIpButton != null) {
+                connectDirectIpButton.setDisable(false);
+            }
+            List<SharedFile> remoteFiles = connectTask.getValue();
+            // Đảm bảo Peer xuất hiện trong peerListView và được chọn luôn
+            Peer peerToSelect = findPeerByIp(targetIp);
+            if (peerToSelect == null) {
+                String ownerName = (remoteFiles != null && !remoteFiles.isEmpty())
+                        ? remoteFiles.get(0).ownerName()
+                        : ("Peer-" + targetIp);
+                peerToSelect = new Peer(targetIp, ownerName, System.currentTimeMillis());
+                peerList.add(peerToSelect);
+            }
+            peerListView.getSelectionModel().select(peerToSelect);
+
+            rawFileEntries.removeIf(f -> f.ownerIp().equals(targetIp));
+            if (remoteFiles != null && !remoteFiles.isEmpty()) {
+                addOrUpdateFileEntries(remoteFiles, false);
+            } else {
+                rebuildMergedFileTable();
+            }
+
+            appendNetworkLog("Kết nối trực tiếp thành công tới " + peerToSelect
+                    + " -> Nhận được " + (remoteFiles == null ? 0 : remoteFiles.size()) + " tệp chia sẻ.");
+        });
+
+        connectTask.setOnFailed(e -> {
+            if (connectDirectIpButton != null) {
+                connectDirectIpButton.setDisable(false);
+            }
+            Throwable ex = connectTask.getException();
+            String reason = (ex != null && ex.getMessage() != null) ? ex.getMessage() : "Không phản hồi";
+            String msg = "Không kết nối được tới " + targetIp + ":8889 (" + reason
+                    + "). Hãy kiểm tra máy bạn đã bật app và bấm 'Cấu hình Firewall (1-Click)' chưa!";
+            setStatus(msg);
+            appendNetworkLog("LỖI kết nối trực tiếp tới " + targetIp + ": " + msg);
+        });
+
+        bindUiToTask(connectTask);
+        Thread t = new Thread(connectTask, "p2p-direct-ip-connector");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Các sự kiện giao diện khác
+    // ------------------------------------------------------------------------------------------
+
     @FXML
     private void handleConfigureFirewall() {
         if (firewallConfigButton != null) {
             firewallConfigButton.setDisable(true);
         }
-        appendNetworkLog("Đang yêu cầu quyền Administrator (UAC) để mở cổng UDP 8888 & TCP 8889 trên Windows Firewall...");
+        appendNetworkLog("Đang yêu cầu quyền Administrator (UAC) để mở cổng UDP 8888 & TCP 8889 (profile=any cho cả Radmin VPN & LAN)...");
         setStatus("Vui lòng bấm 'Yes' trên hộp thoại UAC của Windows để mở cổng mạng...");
 
         Task<Boolean> fwTask = new Task<>() {
@@ -356,14 +484,14 @@ public class MainController implements PeerDiscoveryListener {
                 if (firewallConfigButton != null) {
                     firewallConfigButton.setText("Firewall: Đã mở Port (8888/8889)");
                 }
-                String msg = "Đã thêm thành công Rule Inbound & Outbound (UDP 8888, TCP 8889) vào Windows Firewall!";
+                String msg = "Đã thêm Rule Inbound & Outbound (profile=any: Domain, Private, Public/Radmin VPN) vào Windows Firewall!";
                 setStatus(msg);
                 appendNetworkLog(msg);
 
                 Alert alert = new Alert(Alert.AlertType.INFORMATION);
                 alert.setTitle("Cấu hình Windows Firewall thành công");
-                alert.setHeaderText("Đã mở cổng UDP 8888 & TCP 8889 trên Windows Firewall!");
-                alert.setContentText("Các máy trong mạng LAN giờ đây có thể tự động thấy nhau và truyền tệp mà không cần tắt Firewall.");
+                alert.setHeaderText("Đã mở cổng UDP 8888 & TCP 8889 cho cả mạng LAN và Radmin VPN!");
+                alert.setContentText("Rule đã được áp dụng với profile=any (Private, Public, Domain). Hai máy có thể kết nối trực tiếp mà không cần tắt Firewall.");
                 alert.showAndWait();
             } else {
                 String msg = "Chưa thể thêm Rule Firewall (bạn đã hủy hộp thoại UAC hoặc không có quyền Admin).";
@@ -384,13 +512,9 @@ public class MainController implements PeerDiscoveryListener {
         t.start();
     }
 
-    /**
-     * Nút "Quét sâu mạng LAN" (TCP Active Subnet Scan - 50 luồng):
-     * Quét toàn bộ dải IP {@code .1 -> .254} cùng lớp mạng trên cổng TCP 8889 (timeout 150ms)
-     * để tìm các máy đang mở ứng dụng P2P ngay cả khi Router Wi-Fi chặn gói UDP Broadcast.
-     */
     @FXML
     private void handleDeepScanLan() {
+        refreshHeaderIpBadges();
         if (discoveryService == null) {
             return;
         }
@@ -403,13 +527,13 @@ public class MainController implements PeerDiscoveryListener {
             @Override
             protected List<Peer> call() {
                 updateProgress(-1, 1);
-                updateMessage("Trạng thái: Đang quét sâu toàn bộ lớp mạng LAN (50 luồng TCP, timeout 150ms)...");
+                updateMessage("Trạng thái: Đang quét sâu toàn bộ lớp mạng LAN / Radmin (50 luồng TCP, timeout 150ms)...");
                 List<Peer> found = discoveryService.scanSubnetActiveTcp(
                         P2PServer.DEFAULT_PORT,
                         MainController.this::appendNetworkLog
                 );
                 updateProgress(1.0, 1.0);
-                updateMessage("Trạng thái: Quét sâu mạng LAN hoàn tất — phát hiện "
+                updateMessage("Trạng thái: Quét sâu hoàn tất — phát hiện "
                         + found.size() + " Peer đang mở cổng TCP " + P2PServer.DEFAULT_PORT + ".");
                 return found;
             }
@@ -418,7 +542,7 @@ public class MainController implements PeerDiscoveryListener {
         scanTask.setOnSucceeded(e -> {
             if (deepScanButton != null) {
                 deepScanButton.setDisable(false);
-                deepScanButton.setText("Quét sâu mạng LAN");
+                deepScanButton.setText("Quét sâu mạng LAN / Radmin");
             }
             List<Peer> foundPeers = scanTask.getValue();
             appendNetworkLog("Quét sâu TCP hoàn tất: tìm thấy "
@@ -431,7 +555,7 @@ public class MainController implements PeerDiscoveryListener {
         scanTask.setOnFailed(e -> {
             if (deepScanButton != null) {
                 deepScanButton.setDisable(false);
-                deepScanButton.setText("Quét sâu mạng LAN");
+                deepScanButton.setText("Quét sâu mạng LAN / Radmin");
             }
             setStatus("Lỗi khi quét sâu mạng LAN.");
         });
@@ -442,7 +566,6 @@ public class MainController implements PeerDiscoveryListener {
         t.start();
     }
 
-    /** Nút chuyển đổi giao diện Sáng / Tối (Primer Light <-> Nord Dark) của AtlantaFX. */
     @FXML
     private void handleToggleTheme() {
         boolean isDark = MainApplication.toggleTheme();
@@ -452,7 +575,6 @@ public class MainController implements PeerDiscoveryListener {
         appendNetworkLog("Đã chuyển giao diện sang theme AtlantaFX: " + (isDark ? "Nord Dark" : "Primer Light"));
     }
 
-    /** Nút "Chọn thư mục chia sẻ": đổi Shared Folder và băm SHA-256 trên luồng nền. */
     @FXML
     private void handleChooseSharedFolder() {
         DirectoryChooser chooser = new DirectoryChooser();
@@ -474,9 +596,9 @@ public class MainController implements PeerDiscoveryListener {
         scanLocalSharedFolderAsync();
     }
 
-    /** Nút "Làm mới danh sách tệp": quét lại máy cục bộ và gửi LIST_FILES tới mọi Peer. */
     @FXML
     private void handleRefreshFiles() {
+        refreshHeaderIpBadges();
         List<Peer> snapshotPeers = new ArrayList<>(peerList);
         appendNetworkLog("Đang làm mới danh sách tệp từ thư mục chia sẻ và " + snapshotPeers.size() + " Peer...");
 
@@ -485,7 +607,7 @@ public class MainController implements PeerDiscoveryListener {
             protected List<SharedFile> call() {
                 updateProgress(-1, 1);
                 updateMessage("Trạng thái: Đang quét thư mục chia sẻ và truy vấn "
-                        + snapshotPeers.size() + " Peer trong mạng LAN...");
+                        + snapshotPeers.size() + " Peer...");
 
                 List<SharedFile> combined = new ArrayList<>(sharedFolderManager.scanAndHashSync());
                 int queried = 0;
@@ -572,7 +694,7 @@ public class MainController implements PeerDiscoveryListener {
             Alert alert = new Alert(Alert.AlertType.WARNING);
             alert.setTitle("Chưa chọn máy nhận (Peer)");
             alert.setHeaderText("Vui lòng chọn một Peer đang online ở danh sách bên trái!");
-            alert.setContentText("Bạn cần chọn máy đích trong mạng LAN trước khi chọn tệp để gửi.");
+            alert.setContentText("Bạn cần chọn máy đích trước khi chọn tệp để gửi.");
             alert.showAndWait();
             return;
         }
@@ -708,6 +830,15 @@ public class MainController implements PeerDiscoveryListener {
 
         transferProgressBar.progressProperty().bind(task.progressProperty());
         statusLabel.textProperty().bind(task.messageProperty());
+    }
+
+    private Peer findPeerByIp(String ip) {
+        for (Peer p : peerList) {
+            if (p.ipAddress().equals(ip)) {
+                return p;
+            }
+        }
+        return null;
     }
 
     private int indexOfPeer(Peer peer) {

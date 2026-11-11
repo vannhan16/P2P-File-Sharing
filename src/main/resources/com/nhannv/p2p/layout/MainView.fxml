@@ -13,44 +13,64 @@
 <?import javafx.scene.layout.HBox?>
 <?import javafx.scene.layout.VBox?>
 
-<!-- Main Dashboard: AtlantaFX UI, 1-Click Firewall UAC, Deep LAN Scan, Swarm & Pause/Resume -->
+<!-- Main Dashboard: AtlantaFX UI, Radmin VPN Direct Connect, 1-Click Firewall, Swarm & Pause/Resume -->
 <BorderPane xmlns="http://javafx.com/javafx/17" xmlns:fx="http://javafx.com/fxml/1"
             fx:controller="com.nhannv.p2p.ui.MainController"
-            prefWidth="1120" prefHeight="720">
+            prefWidth="1160" prefHeight="740">
 
-    <!-- TOP: Application header + Shared Folder indicator + 1-Click Firewall + Theme Switcher -->
+    <!-- TOP: Application header + IP LAN / IP Radmin VPN display + 1-Click Firewall + Theme Switcher -->
     <top>
-        <HBox alignment="CENTER_LEFT" spacing="10"
-              style="-fx-background-color: #1f2937;">
-            <padding><Insets top="12" right="16" bottom="12" left="16"/></padding>
-            <Label text="P2P LAN File Sharing"
-                   style="-fx-text-fill: white; -fx-font-size: 18px; -fx-font-weight: bold;"/>
-            <Label text="Swarm • Pause/Resume • SHA-256"
-                   style="-fx-text-fill: #9ca3af;"/>
-            <Label fx:id="sharedFolderLabel" text="Thư mục chia sẻ: Shared/"
-                   HBox.hgrow="ALWAYS" maxWidth="Infinity" alignment="CENTER_RIGHT"
-                   style="-fx-text-fill: #d1d5db; -fx-font-size: 12px;"/>
-            <Button fx:id="firewallConfigButton"
-                    text="Cấu hình Firewall (1-Click)"
-                    onAction="#handleConfigureFirewall"
-                    styleClass="warning"/>
-            <Button fx:id="themeToggleButton" text="Nord Dark"
-                    onAction="#handleToggleTheme"/>
-        </HBox>
+        <VBox style="-fx-background-color: #1f2937;">
+            <HBox alignment="CENTER_LEFT" spacing="10">
+                <padding><Insets top="10" right="16" bottom="6" left="16"/></padding>
+                <Label text="P2P LAN File Sharing"
+                       style="-fx-text-fill: white; -fx-font-size: 18px; -fx-font-weight: bold;"/>
+                <Label text="LAN &amp; Radmin VPN • Swarm • Pause/Resume"
+                       style="-fx-text-fill: #9ca3af;"/>
+                <Label fx:id="networkIpBadgeLabel"
+                       text="IP LAN: Đang dò... | IP Radmin VPN: Đang dò..."
+                       HBox.hgrow="ALWAYS" maxWidth="Infinity" alignment="CENTER"
+                       style="-fx-text-fill: #34d399; -fx-font-weight: bold; -fx-font-size: 13px;"/>
+                <Button fx:id="firewallConfigButton"
+                        text="Cấu hình Firewall (1-Click)"
+                        onAction="#handleConfigureFirewall"
+                        styleClass="warning"/>
+                <Button fx:id="themeToggleButton" text="Nord Dark"
+                        onAction="#handleToggleTheme"/>
+            </HBox>
+            <HBox alignment="CENTER_LEFT" spacing="10">
+                <padding><Insets top="0" right="16" bottom="8" left="16"/></padding>
+                <Label fx:id="sharedFolderLabel" text="Thư mục chia sẻ: Shared/"
+                       style="-fx-text-fill: #d1d5db; -fx-font-size: 12px;"/>
+            </HBox>
+        </VBox>
     </top>
 
-    <!-- LEFT: Online peers in the LAN + Deep TCP Subnet Scan button -->
+    <!-- LEFT: Direct IP Connect (Radmin VPN) + Online peers in the LAN + Deep TCP Subnet Scan -->
     <left>
-        <VBox spacing="8" minWidth="250" prefWidth="250" maxWidth="250">
+        <VBox spacing="8" minWidth="275" prefWidth="275" maxWidth="275">
             <padding><Insets top="12" right="8" bottom="12" left="12"/></padding>
             <HBox alignment="CENTER_LEFT" spacing="6">
                 <Label text="Peers đang online"
                        style="-fx-font-weight: bold;"/>
                 <Label fx:id="peerCountLabel" text="(0)"/>
             </HBox>
+
+            <!-- Thanh kết nối trực tiếp qua IP Radmin VPN (26.x.x.x) hoặc IP LAN -->
+            <HBox alignment="CENTER_LEFT" spacing="6">
+                <TextField fx:id="directIpTextField"
+                           promptText="Nhập IP Radmin (vd: 26.x.x.x)..."
+                           onAction="#handleConnectDirectIp"
+                           HBox.hgrow="ALWAYS"/>
+                <Button fx:id="connectDirectIpButton"
+                        text="Kết nối"
+                        onAction="#handleConnectDirectIp"
+                        styleClass="success"/>
+            </HBox>
+
             <ListView fx:id="peerListView" VBox.vgrow="ALWAYS"/>
             <Button fx:id="deepScanButton"
-                    text="Quét sâu mạng LAN"
+                    text="Quét sâu mạng LAN / Radmin"
                     onAction="#handleDeepScanLan"
                     maxWidth="Infinity"
                     styleClass="accent"/>
@@ -65,7 +85,7 @@
             <!-- Thanh công cụ phía trên vùng giữa: Tìm kiếm + Chọn thư mục chia sẻ + Làm mới -->
             <HBox alignment="CENTER_LEFT" spacing="8">
                 <TextField fx:id="searchTextField"
-                           promptText="Tìm kiếm tệp trên mạng LAN (theo tên, Peer, hoặc SHA-256)..."
+                           promptText="Tìm kiếm tệp trên mạng LAN / Radmin VPN (theo tên, Peer, hoặc SHA-256)..."
                            HBox.hgrow="ALWAYS"/>
                 <Button fx:id="chooseSharedFolderButton"
                         text="Chọn thư mục chia sẻ"
@@ -94,7 +114,7 @@
                 <HBox alignment="CENTER_LEFT" spacing="8">
                     <Label text="Nhật ký sự kiện mạng (Real-time Network Log)"
                            style="-fx-font-weight: bold;"/>
-                    <Label text="(Ghi nhận Subnet Broadcast, Quét sâu TCP, Firewall, Pause/Resume &amp; Swarm)"
+                    <Label text="(Ghi nhận Radmin VPN, Direct Ping, Firewall, Pause/Resume &amp; Swarm)"
                            style="-fx-font-size: 11px;"/>
                 </HBox>
                 <TextArea fx:id="networkLogArea"

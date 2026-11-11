@@ -43,31 +43,22 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * Dịch vụ phát hiện Peer trong mạng LAN bằng <b>Directed Subnet UDP Broadcast</b>
- * kết hợp <b>TCP Active Subnet Scan (Fallback)</b>.
+ * Dịch vụ phát hiện Peer trong mạng LAN nội bộ và mạng LAN ảo <b>Radmin VPN (26.x.x.x)</b>.
  *
- * <h2>Giải thích Kỹ thuật Mạng cho vấn đáp đồ án (Huỳnh Nhân Danh)</h2>
+ * <h2>Giải thích Hỗ trợ Radmin VPN &amp; UDP Direct Ping cho vấn đáp đồ án</h2>
  * <ol>
- *   <li><b>Tại sao gửi tới {@code 255.255.255.255} thường thất bại trên máy Windows thật?</b>
- *       Trên máy lập trình viên thường cài sẵn VMware, VirtualBox, WSL2, Hyper-V, Docker hoặc VPN.
- *       Khi gửi gói UDP tới địa chỉ mù {@code 255.255.255.255}, bảng định tuyến (Routing Table) của
- *       Windows rất hay đẩy gói tin đó vào một card mạng ảo (có metric thấp hơn) thay vì card Wi-Fi/Ethernet thật!</li>
- *   <li><b>Cách khắc phục triệt để (Directed Subnet Broadcast + Lọc Card Ảo):</b>
- *       <ul>
- *         <li>Duyệt {@link NetworkInterface#getNetworkInterfaces()}, chỉ giữ các card mạng đang bật
- *             ({@code isUp() && !isLoopback() && !isVirtual()}) và loại bỏ toàn bộ card có tên chứa
- *             {@code "Virtual", "VMware", "VBox", "WSL", "Hyper-V", "TAP", "VPN", "Docker"...}.</li>
- *         <li>Với mỗi {@link InterfaceAddress} IPv4 thật, lấy chính xác địa chỉ Broadcast của lớp mạng đó
- *             qua {@code interfaceAddress.getBroadcast()} (ví dụ {@code 192.168.1.255}) và mở socket
- *             gắn trực tiếp với IP cục bộ của card mạng đó để ép Windows phát sóng đúng ra card Wi-Fi/LAN.</li>
- *       </ul>
- *   </li>
- *   <li><b>Cơ chế TCP Active Subnet Scan (Fallback khi Router chặn UDP Broadcast):</b>
- *       Nhiều Router Wi-Fi trường học/ký túc xá bật tính năng <i>Broadcast Storm Filter</i> chặn gói UDP
- *       Broadcast nhưng vẫn cho phép kết nối TCP Unicast giữa các máy cùng lớp mạng.
- *       Hàm {@link #scanSubnetActiveTcp(int, Consumer)} dùng {@link ExecutorService} <b>50 luồng</b>
- *       quét nhanh dải IP {@code .1 -> .254} với timeout {@code 150ms} trên cổng TCP {@code 8889}
- *       để tìm ra mọi Peer đang online chỉ trong chưa đầy 1 giây!</li>
+ *   <li><b>Whitelist Card mạng Radmin VPN ({@code 26.x.x.x}):</b>
+ *       Mặc dù Radmin VPN tạo một adapter ảo (<i>Famatech Radmin VPN Ethernet Adapter</i>),
+ *       hàm {@link #isRadminInterface(NetworkInterface)} luôn <b>CHO PHÉP (Whitelist)</b> mọi card mạng
+ *       có tên chứa {@code "Radmin"} hoặc có địa chỉ IPv4 bắt đầu bằng {@code "26."}, trong khi vẫn
+ *       chặn các card máy ảo cục bộ (VMware, VirtualBox, WSL, Hyper-V, Docker).</li>
+ *   <li><b>Dual Broadcast cho Radmin VPN:</b>
+ *       Khi gửi gói UDP Broadcast trên card Radmin ({@code 26.x.x.x}), hệ thống gửi đồng thời tới cả
+ *       địa chỉ Broadcast của card ({@code 26.255.255.255}) lẫn {@code 255.255.255.255}.</li>
+ *   <li><b>UDP Unicast Direct Ping ({@link #sendDirectPing(String)}):</b>
+ *       Gửi trực tiếp gói tin UDP Unicast {@code PING} thẳng tới địa chỉ IP Radmin của bạn cùng nhóm
+ *       (không qua Broadcast). Khi máy bên kia nhận được gói {@code PING}, nó lập tức ghi nhận người gửi
+ *       và phản hồi lại một gói {@code HELLO} trực tiếp về IP người gọi, giúp cả 2 máy thấy nhau tức thì!</li>
  * </ol>
  */
 public final class DiscoveryService implements AutoCloseable {
@@ -79,32 +70,31 @@ public final class DiscoveryService implements AutoCloseable {
     private static final String PROTOCOL_PREFIX = "NHANNV-P2P";
     private static final String PROTOCOL_VERSION = "1";
     private static final String TYPE_HELLO = "HELLO";
+    private static final String TYPE_PING = "PING";
     private static final String TYPE_BYE = "BYE";
     private static final String SEPARATOR = "|";
 
     private static final long BROADCAST_INTERVAL_MS = 3_000;
-    private static final long PEER_TIMEOUT_MS = 12_000;
+    private static final long PEER_TIMEOUT_MS = 15_000;
     private static final long PRUNE_INTERVAL_MS = 3_000;
     private static final int MAX_PACKET_SIZE = 512;
     private static final long THREAD_JOIN_TIMEOUT_MS = 1_000;
 
-    /** Số luồng quét song song khi chạy TCP Active Subnet Scan. */
     private static final int ACTIVE_SCAN_THREADS = 50;
-    /** Timeout kết nối TCP (150ms) đủ nhanh cho mạng LAN nội bộ (< 5ms RTT). */
     private static final int ACTIVE_SCAN_CONNECT_TIMEOUT_MS = 150;
 
-    /** Danh sách từ khóa nhận diện các card mạng ảo cần loại bỏ. */
+    /** Danh sách từ khóa nhận diện các card máy ảo cục bộ cần loại bỏ (KHÔNG chứa Radmin). */
     private static final List<String> VIRTUAL_NIC_KEYWORDS = List.of(
             "virtual", "vmware", "vbox", "wsl", "hyper-v", "tap", "vpn",
-            "vethernet", "docker", "loopback", "npcap", "wan miniport",
-            "zerotier", "tailscale", "hamachi", "radmin"
+            "vethernet", "docker", "loopback", "npcap", "wan miniport"
     );
 
-    /** Thông tin một nhánh mạng LAN vật lý (IP cục bộ + Địa chỉ Broadcast của Subnet). */
+    /** Thông tin một nhánh mạng hợp lệ (LAN vật lý hoặc Radmin VPN). */
     public record LanSubnetTarget(
             String interfaceName,
             InetAddress localAddress,
-            InetAddress broadcastAddress
+            InetAddress broadcastAddress,
+            boolean isRadmin
     ) {
     }
 
@@ -227,18 +217,96 @@ public final class DiscoveryService implements AutoCloseable {
     }
 
     // ------------------------------------------------------------------------------------------
-    // TCP Active Subnet Scan (Fallback khi Router Wi-Fi chặn UDP Broadcast)
+    // TÁC VỤ 1: Gửi trực tiếp gói UDP Unicast PING tới IP chỉ định (Radmin VPN / LAN)
     // ------------------------------------------------------------------------------------------
 
     /**
-     * Quét chủ động toàn bộ dải IP cùng lớp mạng (từ {@code .1} đến {@code .254})
-     * bằng {@code ExecutorService} 50 luồng với kết nối TCP tới {@code tcpPort} (timeout 150ms).
-     * <p>
-     * Giúp tìm thấy các máy đang chạy P2P ngay cả khi Router Wi-Fi chặn gói tin UDP Broadcast.
+     * Gửi trực tiếp một gói tin UDP Unicast {@code "PING"} tới thẳng địa chỉ {@code targetIp}
+     * (không qua Broadcast) để xuyên qua mọi giới hạn mạng ảo của Radmin VPN.
      *
-     * @param tcpPort     cổng TCP của {@link P2PServer} (mặc định 8889)
-     * @param logCallback callback ghi nhật ký ra màn hình
-     * @return danh sách các {@link Peer} tìm thấy qua quét TCP
+     * @param targetIp địa chỉ IPv4 của Peer đích (vd: {@code "26.45.12.88"} hoặc {@code "192.168.1.20"})
+     * @return {@code true} nếu gói UDP đã được đẩy ra socket thành công
+     */
+    public boolean sendDirectPing(String targetIp) {
+        if (targetIp == null || targetIp.isBlank()) {
+            return false;
+        }
+        if (localHostName == null) {
+            localHostName = resolveLocalHostName();
+        }
+        String pingMessage = buildMessage(TYPE_PING, localHostName);
+        byte[] data = pingMessage.getBytes(StandardCharsets.UTF_8);
+
+        try {
+            InetAddress targetAddress = InetAddress.getByName(targetIp.trim());
+            DatagramPacket packet = new DatagramPacket(data, data.length, targetAddress, port);
+
+            // 1) Gửi qua sendSocket chung
+            DatagramSocket s = sendSocket;
+            if (s != null && !s.isClosed()) {
+                s.send(packet);
+            }
+
+            // 2) Nếu có card Radmin VPN (26.x.x.x), gửi thêm 1 gói ép buộc đi từ IP Radmin cục bộ
+            for (LanSubnetTarget subnet : collectPhysicalLanSubnets()) {
+                if (subnet.isRadmin() || targetIp.startsWith("26.")) {
+                    try (DatagramSocket nicSocket = new DatagramSocket(new InetSocketAddress(subnet.localAddress(), 0))) {
+                        nicSocket.send(packet);
+                    } catch (IOException ignored) {
+                    }
+                }
+            }
+            return true;
+        } catch (IOException e) {
+            LOG.log(Level.FINE, "Không thể gửi Direct UDP Ping tới " + targetIp, e);
+            return false;
+        }
+    }
+
+    /**
+     * Kết nối thử tới {@code candidateIp:tcpPort} để xác thực Peer đang chạy P2PServer
+     * và lấy tên máy chính xác (dùng cho nút "Kết nối" trực tiếp qua IP Radmin VPN).
+     */
+    public Peer connectAndVerifyPeerTcp(String candidateIp, int tcpPort, int timeoutMs) {
+        if (candidateIp == null || candidateIp.isBlank()) {
+            return null;
+        }
+        String cleanIp = candidateIp.trim();
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(cleanIp, tcpPort), timeoutMs);
+            socket.setSoTimeout(2_500);
+            socket.setTcpNoDelay(true);
+
+            String remoteHostName = cleanIp;
+            try (DataOutputStream dos = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream()));
+                 DataInputStream dis = new DataInputStream(new BufferedInputStream(socket.getInputStream()))) {
+
+                dos.writeUTF(P2PServer.CMD_PING);
+                dos.writeUTF(localHostName != null ? localHostName : resolveLocalHostName());
+                dos.flush();
+
+                String replyHost = dis.readUTF();
+                if (replyHost != null && !replyHost.isBlank()) {
+                    remoteHostName = replyHost.trim();
+                }
+            } catch (IOException ignored) {
+                remoteHostName = "Peer-" + cleanIp;
+            }
+
+            Peer verifiedPeer = new Peer(cleanIp, remoteHostName, System.currentTimeMillis());
+            Peer previous = knownPeers.put(cleanIp, verifiedPeer);
+            if (previous == null || !previous.hostName().equals(remoteHostName)) {
+                notifyPeerDiscovered(verifiedPeer);
+            }
+            return verifiedPeer;
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Quét chủ động dải IP cùng lớp mạng (từ {@code .1} đến {@code .254})
+     * bằng {@code ExecutorService} 50 luồng với kết nối TCP tới {@code tcpPort} (timeout 150ms).
      */
     public List<Peer> scanSubnetActiveTcp(int tcpPort, Consumer<String> logCallback) {
         List<LanSubnetTarget> subnets = collectPhysicalLanSubnets();
@@ -255,7 +323,7 @@ public final class DiscoveryService implements AutoCloseable {
         }
 
         if (subnetPrefixes.isEmpty()) {
-            logScan(logCallback, "Không tìm thấy card mạng LAN vật lý nào đang kết nối IPv4.");
+            logScan(logCallback, "Không tìm thấy card mạng LAN hoặc Radmin VPN nào đang kết nối IPv4.");
             return List.of();
         }
 
@@ -273,38 +341,21 @@ public final class DiscoveryService implements AutoCloseable {
             logScan(logCallback, "Đang quét sâu dải mạng " + prefix + "1 -> " + prefix + "254 trên cổng TCP "
                     + tcpPort + " (50 luồng, timeout 150ms)...");
 
-            // Đồng thời bắn 1 loạt UDP Unicast trực tiếp tới từng IP trong dải .1 -> .254
-            // để đánh thức ListenTask của các máy khác ngay cả khi Multicast/Broadcast bị chặn.
             if (localHostName == null) {
                 localHostName = resolveLocalHostName();
             }
-            byte[] helloBytes = buildMessage(TYPE_HELLO, localHostName).getBytes(StandardCharsets.UTF_8);
 
             for (int host = 1; host <= 254; host++) {
                 final String candidateIp = prefix + host;
                 if (localIps.contains(candidateIp)) {
-                    continue; // Bỏ qua chính IP của máy mình.
+                    continue;
                 }
 
                 tasks.add(() -> {
-                    // 1) Gửi kèm 1 gói UDP Unicast trực tiếp tới candidateIp:8888
-                    DatagramSocket s = sendSocket;
-                    if (s != null && !s.isClosed()) {
-                        try {
-                            InetAddress addr = InetAddress.getByName(candidateIp);
-                            s.send(new DatagramPacket(helloBytes, helloBytes.length, addr, port));
-                        } catch (IOException ignored) {
-                        }
-                    }
-
-                    // 2) Thử kết nối TCP tới candidateIp:8889 với timeout 150ms
-                    Peer found = probePeerViaTcp(candidateIp, tcpPort);
+                    sendDirectPing(candidateIp);
+                    Peer found = connectAndVerifyPeerTcp(candidateIp, tcpPort, ACTIVE_SCAN_CONNECT_TIMEOUT_MS);
                     if (found != null) {
                         discoveredInScan.add(found);
-                        Peer previous = knownPeers.put(found.ipAddress(), found);
-                        if (previous == null || !previous.hostName().equals(found.hostName())) {
-                            notifyPeerDiscovered(found);
-                        }
                     }
                     return null;
                 });
@@ -328,40 +379,7 @@ public final class DiscoveryService implements AutoCloseable {
         return new ArrayList<>(discoveredInScan);
     }
 
-    /**
-     * Kết nối thử tới {@code candidateIp:tcpPort} trong 150ms và gửi lệnh {@code PING}
-     * để lấy tên máy của Peer đó.
-     */
-    private Peer probePeerViaTcp(String candidateIp, int tcpPort) {
-        try (Socket socket = new Socket()) {
-            socket.connect(new InetSocketAddress(candidateIp, tcpPort), ACTIVE_SCAN_CONNECT_TIMEOUT_MS);
-            socket.setSoTimeout(1_000);
-            socket.setTcpNoDelay(true);
-
-            String remoteHostName = candidateIp;
-            try (DataOutputStream dos = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream()));
-                 DataInputStream dis = new DataInputStream(new BufferedInputStream(socket.getInputStream()))) {
-
-                dos.writeUTF(P2PServer.CMD_PING);
-                dos.writeUTF(localHostName != null ? localHostName : resolveLocalHostName());
-                dos.flush();
-
-                String replyHost = dis.readUTF();
-                if (replyHost != null && !replyHost.isBlank()) {
-                    remoteHostName = replyHost.trim();
-                }
-            } catch (IOException ignored) {
-                // Nếu Peer chạy phiên bản cũ chưa có lệnh PING, cổng 8889 mở vẫn chứng tỏ là Peer P2P!
-                remoteHostName = "Peer-" + candidateIp;
-            }
-
-            return new Peer(candidateIp, remoteHostName, System.currentTimeMillis());
-        } catch (IOException e) {
-            return null; // Không mở cổng TCP 8889 -> không phải Peer P2P.
-        }
-    }
-
-    /** Cho phép {@link P2PServer} báo ngược khi nhận được lệnh PING từ một máy khác. */
+    /** Cho phép {@link P2PServer} báo ngược khi nhận được lệnh PING qua TCP từ một máy khác. */
     public void registerPeerFromPing(String ipAddress, String hostName) {
         if (ipAddress == null || ipAddress.isBlank()) {
             return;
@@ -389,8 +407,12 @@ public final class DiscoveryService implements AutoCloseable {
                     localHostName = resolveLocalHostName();
                 }
                 int sent = sendDirectedSubnetBroadcasts(buildMessage(TYPE_HELLO, localHostName));
+                // Gửi thêm Direct Ping duy trì kết nối tới tất cả các Peer đã biết (đặc biệt hữu ích cho Radmin VPN)
+                for (String knownIp : knownPeers.keySet()) {
+                    sendDirectPing(knownIp);
+                }
                 if (sent == 0 && running.get()) {
-                    notifyError("Không gửi được gói Discovery qua card mạng vật lý. Kiểm tra Wi-Fi/LAN hoặc Firewall.", null);
+                    notifyError("Không gửi được gói Discovery. Kiểm tra kết nối Wi-Fi/Radmin VPN hoặc Firewall.", null);
                 }
             } catch (RuntimeException e) {
                 LOG.log(Level.WARNING, "Lỗi không mong muốn trong BroadcastTask", e);
@@ -433,9 +455,11 @@ public final class DiscoveryService implements AutoCloseable {
                     Map.Entry<String, Peer> entry = it.next();
                     Peer peer = entry.getValue();
                     if (now - peer.lastSeenTimestamp() > PEER_TIMEOUT_MS) {
-                        // Trước khi xóa, kiểm tra nhanh xem cổng TCP 8889 của Peer còn sống không
-                        // (để các Peer tìm thấy qua TCP Active Scan không bị xóa nhầm khi Router chặn UDP).
-                        Peer refreshed = probePeerViaTcp(peer.ipAddress(), P2PServer.DEFAULT_PORT);
+                        Peer refreshed = connectAndVerifyPeerTcp(
+                                peer.ipAddress(),
+                                P2PServer.DEFAULT_PORT,
+                                500
+                        );
                         if (refreshed != null) {
                             entry.setValue(refreshed);
                         } else {
@@ -451,7 +475,7 @@ public final class DiscoveryService implements AutoCloseable {
     }
 
     // ------------------------------------------------------------------------------------------
-    // Xử lý gói tin & Directed Subnet Broadcast (Loại bỏ Card mạng ảo)
+    // Xử lý gói tin & Directed Subnet Broadcast (Ưu tiên Radmin VPN + Card vật lý)
     // ------------------------------------------------------------------------------------------
 
     private void handlePacket(DatagramPacket packet) {
@@ -466,17 +490,23 @@ public final class DiscoveryService implements AutoCloseable {
         String hostName = parts[4].isBlank() ? "Unknown" : parts[4].trim();
 
         if (instanceId.equals(senderId)) {
-            return; // Bỏ qua gói tin của chính máy mình.
+            return; // Bỏ qua gói tin do chính máy mình phát ra.
         }
 
         String ip = packet.getAddress().getHostAddress();
         long now = System.currentTimeMillis();
 
-        if (TYPE_HELLO.equals(type)) {
+        if (TYPE_HELLO.equals(type) || TYPE_PING.equals(type)) {
             Peer fresh = new Peer(ip, hostName, now);
             Peer previous = knownPeers.put(ip, fresh);
             if (previous == null || !previous.hostName().equals(hostName)) {
                 notifyPeerDiscovered(fresh);
+            }
+
+            // Nếu nhận được gói Direct PING (hoặc Peer mới), lập tức trả lời lại bằng gói HELLO Unicast
+            // để máy bên kia cũng thấy mình ngay lập tức!
+            if (TYPE_PING.equals(type) || previous == null) {
+                replyUnicastHello(packet.getAddress());
             }
         } else if (TYPE_BYE.equals(type)) {
             Peer removed = knownPeers.remove(ip);
@@ -486,35 +516,61 @@ public final class DiscoveryService implements AutoCloseable {
         }
     }
 
+    private void replyUnicastHello(InetAddress targetAddress) {
+        if (localHostName == null) {
+            localHostName = resolveLocalHostName();
+        }
+        byte[] data = buildMessage(TYPE_HELLO, localHostName).getBytes(StandardCharsets.UTF_8);
+        DatagramSocket s = sendSocket;
+        if (s != null && !s.isClosed()) {
+            try {
+                s.send(new DatagramPacket(data, data.length, targetAddress, port));
+            } catch (IOException ignored) {
+            }
+        }
+    }
+
     private String buildMessage(String type, String hostName) {
         return String.join(SEPARATOR, PROTOCOL_PREFIX, PROTOCOL_VERSION, type, instanceId, hostName);
     }
 
     /**
-     * Gửi gói UDP Ping trực tiếp qua từng card mạng vật lý tới đúng địa chỉ Broadcast
-     * của từng Subnet ({@code interfaceAddress.getBroadcast()}, vd {@code 192.168.1.255}).
+     * Gửi gói UDP Broadcast qua tất cả các card mạng vật lý và card <b>Radmin VPN (26.x.x.x)</b>.
      * <p>
-     * Việc bind một {@link DatagramSocket} tạm vào đúng {@code target.localAddress()} ép hệ điều hành
-     * Windows định tuyến gói Broadcast đi ra đúng card Wi-Fi / Ethernet vật lý đó, không bao giờ
-     * bị kẹt ở card mạng ảo WSL/VMware/VirtualBox!
+     * Đặc biệt với card mạng Radmin VPN ({@code 26.x.x.x}), hàm gửi đồng thời tới cả:
+     * <ol>
+     *   <li>Địa chỉ Broadcast của card ({@code 26.255.255.255}).</li>
+     *   <li>Địa chỉ Broadcast toàn cục ({@code 255.255.255.255}).</li>
+     * </ol>
      */
     private int sendDirectedSubnetBroadcasts(String message) {
         byte[] data = message.getBytes(StandardCharsets.UTF_8);
         int success = 0;
 
-        List<LanSubnetTarget> physicalSubnets = collectPhysicalLanSubnets();
-        for (LanSubnetTarget target : physicalSubnets) {
+        List<LanSubnetTarget> activeSubnets = collectPhysicalLanSubnets();
+        for (LanSubnetTarget target : activeSubnets) {
             try (DatagramSocket nicSocket = new DatagramSocket(new InetSocketAddress(target.localAddress(), 0))) {
                 nicSocket.setBroadcast(true);
-                DatagramPacket packet = new DatagramPacket(data, data.length, target.broadcastAddress(), port);
-                nicSocket.send(packet);
+
+                // 1) Gửi tới địa chỉ Broadcast của Subnet (vd: 192.168.1.255 hoặc 26.255.255.255)
+                DatagramPacket subnetPacket = new DatagramPacket(data, data.length, target.broadcastAddress(), port);
+                nicSocket.send(subnetPacket);
                 success++;
+
+                // 2) Nếu là card mạng Radmin VPN (26.x.x.x), gửi đồng thời tới cả 26.255.255.255 và 255.255.255.255
+                if (target.isRadmin()) {
+                    InetAddress radminBroadcast = InetAddress.getByName("26.255.255.255");
+                    if (!radminBroadcast.equals(target.broadcastAddress())) {
+                        nicSocket.send(new DatagramPacket(data, data.length, radminBroadcast, port));
+                    }
+                    InetAddress globalBroadcast = InetAddress.getByName("255.255.255.255");
+                    nicSocket.send(new DatagramPacket(data, data.length, globalBroadcast, port));
+                }
             } catch (IOException e) {
                 LOG.log(Level.FINE, "Không gửi được broadcast qua card " + target.interfaceName(), e);
             }
         }
 
-        // Nếu máy có cấu hình mạng đặc biệt không lấy được subnet broadcast, fallback về sendSocket chung.
         if (success == 0) {
             DatagramSocket fallbackSocket = sendSocket;
             if (fallbackSocket != null && !fallbackSocket.isClosed()) {
@@ -532,26 +588,45 @@ public final class DiscoveryService implements AutoCloseable {
     }
 
     /**
-     * Duyệt qua tất cả {@link NetworkInterface} đang hoạt động ({@code isUp() && !isLoopback()}),
-     * bỏ qua các card mạng ảo (Virtual, VMware, VBox, WSL, Hyper-V, TAP, VPN...) và trích xuất
-     * địa chỉ Broadcast của từng Subnet IPv4 vật lý.
+     * Duyệt qua tất cả {@link NetworkInterface} đang hoạt động:
+     * <ul>
+     *   <li><b>LUÔN CHO PHÉP (Whitelist)</b> card mạng có tên chứa {@code "Radmin"} hoặc có IP bắt đầu bằng {@code "26."}.</li>
+     *   <li>Bỏ qua các card máy ảo cục bộ (VMware, VirtualBox, WSL, Hyper-V, Docker...).</li>
+     * </ul>
      */
     public static List<LanSubnetTarget> collectPhysicalLanSubnets() {
         List<LanSubnetTarget> result = new ArrayList<>();
         try {
             for (NetworkInterface nif : Collections.list(NetworkInterface.getNetworkInterfaces())) {
-                if (!nif.isUp() || nif.isLoopback() || nif.isVirtual()) {
+                if (!nif.isUp() || nif.isLoopback()) {
                     continue;
                 }
-                if (isVirtualNetworkInterface(nif)) {
+
+                boolean radminNic = isRadminInterface(nif);
+                // Nếu KHÔNG phải Radmin VPN thì mới kiểm tra và lọc bỏ card mạng ảo.
+                if (!radminNic && (nif.isVirtual() || isVirtualNetworkInterface(nif))) {
                     continue;
                 }
 
                 for (InterfaceAddress ia : nif.getInterfaceAddresses()) {
                     InetAddress addr = ia.getAddress();
+                    if (!(addr instanceof Inet4Address) || addr.isLoopbackAddress()) {
+                        continue;
+                    }
+
+                    String ipStr = addr.getHostAddress();
+                    boolean isRadminIp = radminNic || ipStr.startsWith("26.");
+
                     InetAddress broadcast = ia.getBroadcast();
-                    if (addr instanceof Inet4Address && !addr.isLoopbackAddress() && broadcast != null) {
-                        result.add(new LanSubnetTarget(nif.getDisplayName(), addr, broadcast));
+                    if (isRadminIp && broadcast == null) {
+                        try {
+                            broadcast = InetAddress.getByName("26.255.255.255");
+                        } catch (UnknownHostException ignored) {
+                        }
+                    }
+
+                    if (broadcast != null) {
+                        result.add(new LanSubnetTarget(nif.getDisplayName(), addr, broadcast, isRadminIp));
                     }
                 }
             }
@@ -562,10 +637,32 @@ public final class DiscoveryService implements AutoCloseable {
     }
 
     /**
-     * Kiểm tra tên hoặc mô tả của card mạng có chứa các từ khóa của card mạng ảo hay không:
-     * {@code "Virtual", "VMware", "VBox", "WSL", "Hyper-V", "TAP", "VPN"...}.
+     * Kiểm tra xem một {@link NetworkInterface} có phải là card mạng của <b>Radmin VPN</b> hay không
+     * (dựa trên tên chứa {@code "Radmin"} hoặc sở hữu địa chỉ IPv4 thuộc dải {@code 26.x.x.x}).
+     */
+    public static boolean isRadminInterface(NetworkInterface nif) {
+        String name = (nif.getName() == null ? "" : nif.getName()).toLowerCase(Locale.ROOT);
+        String display = (nif.getDisplayName() == null ? "" : nif.getDisplayName()).toLowerCase(Locale.ROOT);
+        if (name.contains("radmin") || display.contains("radmin") || display.contains("famatech")) {
+            return true;
+        }
+        for (InterfaceAddress ia : nif.getInterfaceAddresses()) {
+            InetAddress addr = ia.getAddress();
+            if (addr instanceof Inet4Address && addr.getHostAddress().startsWith("26.")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Kiểm tra tên hoặc mô tả của card mạng có chứa các từ khóa của card máy ảo cục bộ hay không.
+     * Lưu ý: Radmin VPN luôn được ưu tiên giữ lại trước khi gọi hàm này.
      */
     public static boolean isVirtualNetworkInterface(NetworkInterface nif) {
+        if (isRadminInterface(nif)) {
+            return false;
+        }
         String name = (nif.getName() == null ? "" : nif.getName()).toLowerCase(Locale.ROOT);
         String display = (nif.getDisplayName() == null ? "" : nif.getDisplayName()).toLowerCase(Locale.ROOT);
         for (String keyword : VIRTUAL_NIC_KEYWORDS) {
@@ -574,6 +671,26 @@ public final class DiscoveryService implements AutoCloseable {
             }
         }
         return false;
+    }
+
+    /** Lấy địa chỉ IP LAN nội bộ (vd: {@code 192.168.1.x}) của máy để hiển thị trên thanh tiêu đề. */
+    public static String detectLocalLanIp() {
+        for (LanSubnetTarget target : collectPhysicalLanSubnets()) {
+            if (!target.isRadmin()) {
+                return target.localAddress().getHostAddress();
+            }
+        }
+        return "Chưa kết nối";
+    }
+
+    /** Lấy địa chỉ IP Radmin VPN ({@code 26.x.x.x}) của máy (nếu đang bật Radmin VPN). */
+    public static String detectRadminVpnIp() {
+        for (LanSubnetTarget target : collectPhysicalLanSubnets()) {
+            if (target.isRadmin()) {
+                return target.localAddress().getHostAddress();
+            }
+        }
+        return "Chưa bật";
     }
 
     private static String resolveLocalHostName() {
