@@ -8,6 +8,7 @@ import com.nhannv.p2p.network.DownloadManager;
 import com.nhannv.p2p.network.FileSenderTask;
 import com.nhannv.p2p.network.P2PServer;
 import com.nhannv.p2p.network.PeerDiscoveryListener;
+import com.nhannv.p2p.util.FirewallUtil;
 import com.nhannv.p2p.util.SharedFolderManager;
 import javafx.application.Platform;
 import javafx.beans.binding.Bindings;
@@ -42,19 +43,19 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * Controller trung tâm của {@code MainView.fxml} (Milestone 4 - Final Technical Milestone).
+ * Controller trung tâm của {@code MainView.fxml}.
  *
- * <h2>Các tính năng nổi bật (Thuyết trình & Vấn đáp đồ án)</h2>
+ * <h2>Các tính năng nổi bật (Thuyết trình &amp; Vấn đáp đồ án)</h2>
  * <ul>
- *   <li><b>Gộp nguồn Swarm theo SHA-256:</b>
- *       Các tệp có cùng mã {@code sha256Hash} từ nhiều Peer được gộp thông minh trên {@code TableView}
- *       và hiển thị số lượng nguồn ở cột <b>"Số nguồn (Peers)"</b> (vd: {@code "2 Peers (Swarm)"}).</li>
- *   <li><b>Điều khiển Pause / Resume / Cancel:</b>
- *       Kết nối trực tiếp với {@link DownloadManager} để tạm dừng, tiếp tục tải từ chính xác byte offset
- *       của tệp {@code .part}, hoặc hủy và dọn dẹp tệp tạm.</li>
- *   <li><b>Nhật ký sự kiện mạng thời gian thực ({@code networkLogArea}):</b>
- *       Ghi lại chi tiết từng mốc thời gian {@code [HH:mm:ss]} của mọi sự kiện UDP Discovery,
- *       Offset Resume, phân đoạn Swarm và xác thực SHA-256.</li>
+ *   <li><b>Directed Subnet UDP Broadcast &amp; TCP Active Subnet Scan:</b>
+ *       Tự động lọc bỏ các card mạng ảo (VMware, VirtualBox, WSL, Hyper-V, VPN...) để gửi gói UDP
+ *       Broadcast ra đúng card Wi-Fi/LAN thật, kèm nút <b>"Quét sâu mạng LAN"</b> (50 luồng TCP)
+ *       để tìm thấy nhau ngay cả khi Router Wi-Fi chặn UDP Broadcast.</li>
+ *   <li><b>Cấu hình Windows Firewall 1-Click (Không cần tắt Firewall):</b>
+ *       Nút <b>"Cấu hình Firewall (1-Click)"</b> bật hộp thoại UAC của Windows để tự động mở đúng
+ *       cổng UDP 8888 và TCP 8889 (Inbound &amp; Outbound).</li>
+ *   <li><b>Gộp nguồn Swarm theo SHA-256 &amp; Pause/Resume/Cancel:</b>
+ *       Hỗ trợ tải đa nguồn song song từ nhiều Peer hoặc tạm dừng/tiếp tục từ tệp {@code .part}.</li>
  * </ul>
  */
 public class MainController implements PeerDiscoveryListener {
@@ -66,6 +67,9 @@ public class MainController implements PeerDiscoveryListener {
     private Label sharedFolderLabel;
 
     @FXML
+    private Button firewallConfigButton;
+
+    @FXML
     private Button themeToggleButton;
 
     @FXML
@@ -73,6 +77,9 @@ public class MainController implements PeerDiscoveryListener {
 
     @FXML
     private Label peerCountLabel;
+
+    @FXML
+    private Button deepScanButton;
 
     @FXML
     private TextField searchTextField;
@@ -173,6 +180,8 @@ public class MainController implements PeerDiscoveryListener {
 
         updateSharedFolderLabel();
         appendNetworkLog("Khởi tạo hệ thống P2P File Sharing (AtlantaFX UI + Swarm + Pause/Resume)...");
+        logDetectedPhysicalSubnets();
+        checkFirewallStatusAsync();
 
         // --- 3. Khởi động UDP Discovery & P2P Multi-Command TCP Server ---
         startDiscovery();
@@ -180,6 +189,37 @@ public class MainController implements PeerDiscoveryListener {
 
         // --- 4. Quét thư mục Shared mặc định lần đầu trên Background Thread ---
         scanLocalSharedFolderAsync();
+    }
+
+    private void logDetectedPhysicalSubnets() {
+        List<DiscoveryService.LanSubnetTarget> subnets = DiscoveryService.collectPhysicalLanSubnets();
+        if (subnets.isEmpty()) {
+            appendNetworkLog("Cảnh báo: Chưa phát hiện card mạng LAN/Wi-Fi vật lý nào đang có IPv4.");
+        } else {
+            for (DiscoveryService.LanSubnetTarget s : subnets) {
+                appendNetworkLog("Card mạng vật lý hợp lệ: " + s.interfaceName()
+                        + " [IP=" + s.localAddress().getHostAddress()
+                        + " -> Broadcast=" + s.broadcastAddress().getHostAddress() + "]");
+            }
+        }
+    }
+
+    private void checkFirewallStatusAsync() {
+        Thread t = new Thread(() -> {
+            boolean configured = FirewallUtil.isFirewallRuleConfigured();
+            runOnFxThread(() -> {
+                if (configured) {
+                    if (firewallConfigButton != null) {
+                        firewallConfigButton.setText("Firewall: Đã mở Port (8888/8889)");
+                    }
+                    appendNetworkLog("Windows Firewall: Đã có sẵn Rule cho phép UDP 8888 & TCP 8889.");
+                } else {
+                    appendNetworkLog("Gợi ý: Nếu 2 máy chưa thấy nhau, hãy bấm nút 'Cấu hình Firewall (1-Click)' ở góc trên!");
+                }
+            });
+        }, "p2p-firewall-checker");
+        t.setDaemon(true);
+        t.start();
     }
 
     private static boolean matchesSearchKeyword(SharedFile file, String keyword) {
@@ -197,7 +237,8 @@ public class MainController implements PeerDiscoveryListener {
         discoveryService = new DiscoveryService(this);
         try {
             discoveryService.start();
-            appendNetworkLog("UDP Discovery đã mở trên cổng " + discoveryService.getPort() + " (Broadcast 3s/lần).");
+            appendNetworkLog("UDP Discovery đã mở trên cổng " + discoveryService.getPort()
+                    + " (Directed Subnet Broadcast 3s/lần, đã lọc bỏ card mạng ảo).");
         } catch (BindException e) {
             String msg = "Lỗi: UDP port " + discoveryService.getPort() + " đang bị chiếm!";
             setStatus(msg);
@@ -217,6 +258,7 @@ public class MainController implements PeerDiscoveryListener {
                 receivedFile -> runOnFxThread(() -> addOrUpdateFileEntries(List.of(receivedFile), false)),
                 this::appendNetworkLog
         );
+        p2pServer.setDiscoveryService(discoveryService);
 
         bindUiToTask(p2pServer);
         p2pServer.messageProperty().addListener((obs, oldMsg, newMsg) -> {
@@ -229,7 +271,7 @@ public class MainController implements PeerDiscoveryListener {
         serverThread.setDaemon(true);
         serverThread.start();
         appendNetworkLog("TCP Multi-Command Server lắng nghe cổng " + P2PServer.DEFAULT_PORT
-                + " (LIST_FILES, DOWNLOAD_FILE, DOWNLOAD_CHUNK, PUSH_FILE).");
+                + " (PING, LIST_FILES, DOWNLOAD_FILE, DOWNLOAD_CHUNK, PUSH_FILE).");
     }
 
     /** Giải phóng tài nguyên mạng khi người dùng bấm X tắt ứng dụng. */
@@ -279,8 +321,126 @@ public class MainController implements PeerDiscoveryListener {
     }
 
     // ------------------------------------------------------------------------------------------
-    // Sự kiện giao diện: Theme, Shared Folder, LIST_FILES, Tải (Swarm/Resume), Pause, Resume, Cancel
+    // Sự kiện giao diện: Cấu hình Firewall 1-Click, Quét sâu mạng LAN, Theme, Shared Folder, Tải tệp
     // ------------------------------------------------------------------------------------------
+
+    /**
+     * Nút "Cấu hình Firewall (1-Click)":
+     * Gọi {@link FirewallUtil#configureFirewallRulesWithUac(int, int)} để bật cửa sổ UAC (Yes/No)
+     * và thêm Rule Inbound/Outbound cho cổng UDP 8888 &amp; TCP 8889 mà không cần tắt Windows Firewall.
+     */
+    @FXML
+    private void handleConfigureFirewall() {
+        if (firewallConfigButton != null) {
+            firewallConfigButton.setDisable(true);
+        }
+        appendNetworkLog("Đang yêu cầu quyền Administrator (UAC) để mở cổng UDP 8888 & TCP 8889 trên Windows Firewall...");
+        setStatus("Vui lòng bấm 'Yes' trên hộp thoại UAC của Windows để mở cổng mạng...");
+
+        Task<Boolean> fwTask = new Task<>() {
+            @Override
+            protected Boolean call() {
+                return FirewallUtil.configureFirewallRulesWithUac(
+                        DiscoveryService.DEFAULT_PORT,
+                        P2PServer.DEFAULT_PORT
+                );
+            }
+        };
+
+        fwTask.setOnSucceeded(e -> {
+            if (firewallConfigButton != null) {
+                firewallConfigButton.setDisable(false);
+            }
+            boolean ok = Boolean.TRUE.equals(fwTask.getValue());
+            if (ok) {
+                if (firewallConfigButton != null) {
+                    firewallConfigButton.setText("Firewall: Đã mở Port (8888/8889)");
+                }
+                String msg = "Đã thêm thành công Rule Inbound & Outbound (UDP 8888, TCP 8889) vào Windows Firewall!";
+                setStatus(msg);
+                appendNetworkLog(msg);
+
+                Alert alert = new Alert(Alert.AlertType.INFORMATION);
+                alert.setTitle("Cấu hình Windows Firewall thành công");
+                alert.setHeaderText("Đã mở cổng UDP 8888 & TCP 8889 trên Windows Firewall!");
+                alert.setContentText("Các máy trong mạng LAN giờ đây có thể tự động thấy nhau và truyền tệp mà không cần tắt Firewall.");
+                alert.showAndWait();
+            } else {
+                String msg = "Chưa thể thêm Rule Firewall (bạn đã hủy hộp thoại UAC hoặc không có quyền Admin).";
+                setStatus(msg);
+                appendNetworkLog(msg);
+            }
+        });
+
+        fwTask.setOnFailed(e -> {
+            if (firewallConfigButton != null) {
+                firewallConfigButton.setDisable(false);
+            }
+            setStatus("Lỗi khi cấu hình Firewall.");
+        });
+
+        Thread t = new Thread(fwTask, "p2p-firewall-uac-config");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /**
+     * Nút "Quét sâu mạng LAN" (TCP Active Subnet Scan - 50 luồng):
+     * Quét toàn bộ dải IP {@code .1 -> .254} cùng lớp mạng trên cổng TCP 8889 (timeout 150ms)
+     * để tìm các máy đang mở ứng dụng P2P ngay cả khi Router Wi-Fi chặn gói UDP Broadcast.
+     */
+    @FXML
+    private void handleDeepScanLan() {
+        if (discoveryService == null) {
+            return;
+        }
+        if (deepScanButton != null) {
+            deepScanButton.setDisable(true);
+            deepScanButton.setText("Đang quét dải IP (.1-.254)...");
+        }
+
+        Task<List<Peer>> scanTask = new Task<>() {
+            @Override
+            protected List<Peer> call() {
+                updateProgress(-1, 1);
+                updateMessage("Trạng thái: Đang quét sâu toàn bộ lớp mạng LAN (50 luồng TCP, timeout 150ms)...");
+                List<Peer> found = discoveryService.scanSubnetActiveTcp(
+                        P2PServer.DEFAULT_PORT,
+                        MainController.this::appendNetworkLog
+                );
+                updateProgress(1.0, 1.0);
+                updateMessage("Trạng thái: Quét sâu mạng LAN hoàn tất — phát hiện "
+                        + found.size() + " Peer đang mở cổng TCP " + P2PServer.DEFAULT_PORT + ".");
+                return found;
+            }
+        };
+
+        scanTask.setOnSucceeded(e -> {
+            if (deepScanButton != null) {
+                deepScanButton.setDisable(false);
+                deepScanButton.setText("Quét sâu mạng LAN");
+            }
+            List<Peer> foundPeers = scanTask.getValue();
+            appendNetworkLog("Quét sâu TCP hoàn tất: tìm thấy "
+                    + (foundPeers == null ? 0 : foundPeers.size()) + " Peer hoạt động.");
+            if (foundPeers != null && !foundPeers.isEmpty()) {
+                fetchFilesFromPeersAsync(foundPeers);
+            }
+        });
+
+        scanTask.setOnFailed(e -> {
+            if (deepScanButton != null) {
+                deepScanButton.setDisable(false);
+                deepScanButton.setText("Quét sâu mạng LAN");
+            }
+            setStatus("Lỗi khi quét sâu mạng LAN.");
+        });
+
+        bindUiToTask(scanTask);
+        Thread t = new Thread(scanTask, "p2p-deep-subnet-scan");
+        t.setDaemon(true);
+        t.start();
+    }
 
     /** Nút chuyển đổi giao diện Sáng / Tối (Primer Light <-> Nord Dark) của AtlantaFX. */
     @FXML
@@ -339,7 +499,6 @@ public class MainController implements PeerDiscoveryListener {
                     try {
                         combined.addAll(P2PServer.requestFileListFromPeer(peer));
                     } catch (IOException ignored) {
-                        // Peer tạm thời bận -> tiếp tục hỏi các Peer còn lại.
                     }
                 }
 
@@ -364,12 +523,6 @@ public class MainController implements PeerDiscoveryListener {
         thread.start();
     }
 
-    /**
-     * Nút "Tải tệp đã chọn":
-     * Giao cho {@link DownloadManager} tự động chọn tải Đa nguồn ({@code SwarmDownloadTask})
-     * nếu có nhiều Peer cùng giữ mã SHA-256, hoặc tải Đơn nguồn có hỗ trợ Pause/Resume
-     * ({@code ResumableDownloadTask}).
-     */
     @FXML
     private void handleDownloadSelectedFile() {
         SharedFile selectedFile = sharedFileTable.getSelectionModel().getSelectedItem();
@@ -386,7 +539,6 @@ public class MainController implements PeerDiscoveryListener {
         bindUiToTask(downloadTask);
     }
 
-    /** Nút "Tạm dừng (Pause)": tạm dừng phiên tải đang chạy, giữ nguyên tệp {@code .part}. */
     @FXML
     private void handlePauseDownload() {
         boolean paused = downloadManager.pauseCurrentDownload();
@@ -395,7 +547,6 @@ public class MainController implements PeerDiscoveryListener {
         }
     }
 
-    /** Nút "Tiếp tục (Resume)": tải nối tiếp từ byte offset của tệp {@code .part}. */
     @FXML
     private void handleResumeDownload() {
         Task<Boolean> resumedTask = downloadManager.resumeCurrentDownload();
@@ -406,7 +557,6 @@ public class MainController implements PeerDiscoveryListener {
         }
     }
 
-    /** Nút "Hủy (Cancel)": dừng phiên tải và xóa sạch tệp tạm {@code .part}. */
     @FXML
     private void handleCancelDownload() {
         downloadManager.cancelCurrentDownload();
@@ -415,7 +565,6 @@ public class MainController implements PeerDiscoveryListener {
         setStatus("Đã hủy tải và xóa tệp tạm (.part).");
     }
 
-    /** Nút "Chọn file (Push)": chủ động đẩy một tệp sang Peer đang chọn bên trái. */
     @FXML
     private void handleChooseFile() {
         Peer selectedPeer = peerListView.getSelectionModel().getSelectedItem();
@@ -487,7 +636,6 @@ public class MainController implements PeerDiscoveryListener {
                     try {
                         fetched.addAll(P2PServer.requestFileListFromPeer(peer));
                     } catch (IOException ignored) {
-                        // Peer chưa mở cổng TCP hoặc đang bận.
                     }
                 }
                 return fetched;
@@ -511,10 +659,6 @@ public class MainController implements PeerDiscoveryListener {
         t.start();
     }
 
-    /**
-     * Cập nhật danh sách tệp thô và tự động gộp các tệp có cùng mã {@code sha256Hash}
-     * từ nhiều Peer thành 1 dòng duy nhất trên {@code TableView} với danh sách {@code peerIps} đầy đủ.
-     */
     private void addOrUpdateFileEntries(List<SharedFile> incomingFiles, boolean replaceAll) {
         if (replaceAll) {
             rawFileEntries.clear();
@@ -542,10 +686,6 @@ public class MainController implements PeerDiscoveryListener {
         masterFileList.setAll(mergedBySha256.values());
     }
 
-    /**
-     * Ghi một dòng sự kiện kèm mốc thời gian {@code [HH:mm:ss]} vào ô Nhật ký sự kiện mạng.
-     * Tự động chuyển về JavaFX Application Thread nếu được gọi từ luồng mạng.
-     */
     public void appendNetworkLog(String eventMessage) {
         String timestamp = LocalTime.now().format(TIME_FORMATTER);
         String line = "[" + timestamp + "] " + eventMessage + "\n";
@@ -592,7 +732,6 @@ public class MainController implements PeerDiscoveryListener {
         try {
             Platform.runLater(action);
         } catch (IllegalStateException ignored) {
-            // JavaFX toolkit đã tắt.
         }
     }
 }

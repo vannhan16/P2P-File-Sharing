@@ -13,14 +13,14 @@
 <?import javafx.scene.layout.HBox?>
 <?import javafx.scene.layout.VBox?>
 
-<!-- Main Dashboard (Milestone 4): AtlantaFX UI, Swarm Peer Counter, Pause/Resume/Cancel & Live Network Log -->
+<!-- Main Dashboard: AtlantaFX UI, 1-Click Firewall UAC, Deep LAN Scan, Swarm & Pause/Resume -->
 <BorderPane xmlns="http://javafx.com/javafx/17" xmlns:fx="http://javafx.com/fxml/1"
             fx:controller="com.nhannv.p2p.ui.MainController"
-            prefWidth="1080" prefHeight="720">
+            prefWidth="1120" prefHeight="720">
 
-    <!-- TOP: Application header + Shared Folder indicator + Theme Switcher -->
+    <!-- TOP: Application header + Shared Folder indicator + 1-Click Firewall + Theme Switcher -->
     <top>
-        <HBox alignment="CENTER_LEFT" spacing="12"
+        <HBox alignment="CENTER_LEFT" spacing="10"
               style="-fx-background-color: #1f2937;">
             <padding><Insets top="12" right="16" bottom="12" left="16"/></padding>
             <Label text="P2P LAN File Sharing"
@@ -30,14 +30,18 @@
             <Label fx:id="sharedFolderLabel" text="Thư mục chia sẻ: Shared/"
                    HBox.hgrow="ALWAYS" maxWidth="Infinity" alignment="CENTER_RIGHT"
                    style="-fx-text-fill: #d1d5db; -fx-font-size: 12px;"/>
+            <Button fx:id="firewallConfigButton"
+                    text="Cấu hình Firewall (1-Click)"
+                    onAction="#handleConfigureFirewall"
+                    styleClass="warning"/>
             <Button fx:id="themeToggleButton" text="Nord Dark"
                     onAction="#handleToggleTheme"/>
         </HBox>
     </top>
 
-    <!-- LEFT: Online peers in the LAN -->
+    <!-- LEFT: Online peers in the LAN + Deep TCP Subnet Scan button -->
     <left>
-        <VBox spacing="8" minWidth="240" prefWidth="240" maxWidth="240">
+        <VBox spacing="8" minWidth="250" prefWidth="250" maxWidth="250">
             <padding><Insets top="12" right="8" bottom="12" left="12"/></padding>
             <HBox alignment="CENTER_LEFT" spacing="6">
                 <Label text="Peers đang online"
@@ -45,6 +49,11 @@
                 <Label fx:id="peerCountLabel" text="(0)"/>
             </HBox>
             <ListView fx:id="peerListView" VBox.vgrow="ALWAYS"/>
+            <Button fx:id="deepScanButton"
+                    text="Quét sâu mạng LAN"
+                    onAction="#handleDeepScanLan"
+                    maxWidth="Infinity"
+                    styleClass="accent"/>
         </VBox>
     </left>
 
@@ -85,7 +94,7 @@
                 <HBox alignment="CENTER_LEFT" spacing="8">
                     <Label text="Nhật ký sự kiện mạng (Real-time Network Log)"
                            style="-fx-font-weight: bold;"/>
-                    <Label text="(Ghi nhận Offset, Pause/Resume, Multi-source Swarm &amp; SHA-256)"
+                    <Label text="(Ghi nhận Subnet Broadcast, Quét sâu TCP, Firewall, Pause/Resume &amp; Swarm)"
                            style="-fx-font-size: 11px;"/>
                 </HBox>
                 <TextArea fx:id="networkLogArea"

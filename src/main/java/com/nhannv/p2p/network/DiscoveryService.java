@@ -2,50 +2,73 @@ package com.nhannv.p2p.network;
 
 import com.nhannv.p2p.model.Peer;
 
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.net.BindException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
+import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.InterfaceAddress;
 import java.net.NetworkInterface;
+import java.net.Socket;
 import java.net.SocketException;
 import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * Dịch vụ tự động phát hiện Peer trong mạng LAN bằng UDP Broadcast.
+ * Dịch vụ phát hiện Peer trong mạng LAN bằng <b>Directed Subnet UDP Broadcast</b>
+ * kết hợp <b>TCP Active Subnet Scan (Fallback)</b>.
  *
- * <h2>Cơ chế hoạt động</h2>
- * <ul>
- *   <li><b>BroadcastTask</b>: cứ mỗi {@value #BROADCAST_INTERVAL_MS} ms gửi gói HELLO chứa
- *       tên máy tới 255.255.255.255 và địa chỉ broadcast của từng card mạng.</li>
- *   <li><b>ListenTask</b>: một luồng riêng chặn (blocking) trên {@link DatagramSocket#receive}
- *       để nhận gói tin từ các Peer khác.</li>
- *   <li><b>PruneTask</b>: định kỳ loại bỏ Peer đã quá {@value #PEER_TIMEOUT_MS} ms không phát tín hiệu
- *       (trường hợp máy kia rớt mạng / tắt đột ngột không kịp gửi BYE).</li>
- * </ul>
- *
- * <h2>Định dạng gói tin (UTF-8, phân tách bằng '|')</h2>
- * <pre>NHANNV-P2P|1|HELLO|&lt;instanceId&gt;|&lt;hostName&gt;
- * NHANNV-P2P|1|BYE|&lt;instanceId&gt;|&lt;hostName&gt;</pre>
- * Tiền tố + phiên bản giúp bỏ qua các gói UDP "lạ" của ứng dụng khác dùng chung cổng.
- * {@code instanceId} (UUID ngẫu nhiên mỗi lần chạy) giúp nhận ra và bỏ qua gói tin do chính mình gửi.
+ * <h2>Giải thích Kỹ thuật Mạng cho vấn đáp đồ án (Huỳnh Nhân Danh)</h2>
+ * <ol>
+ *   <li><b>Tại sao gửi tới {@code 255.255.255.255} thường thất bại trên máy Windows thật?</b>
+ *       Trên máy lập trình viên thường cài sẵn VMware, VirtualBox, WSL2, Hyper-V, Docker hoặc VPN.
+ *       Khi gửi gói UDP tới địa chỉ mù {@code 255.255.255.255}, bảng định tuyến (Routing Table) của
+ *       Windows rất hay đẩy gói tin đó vào một card mạng ảo (có metric thấp hơn) thay vì card Wi-Fi/Ethernet thật!</li>
+ *   <li><b>Cách khắc phục triệt để (Directed Subnet Broadcast + Lọc Card Ảo):</b>
+ *       <ul>
+ *         <li>Duyệt {@link NetworkInterface#getNetworkInterfaces()}, chỉ giữ các card mạng đang bật
+ *             ({@code isUp() && !isLoopback() && !isVirtual()}) và loại bỏ toàn bộ card có tên chứa
+ *             {@code "Virtual", "VMware", "VBox", "WSL", "Hyper-V", "TAP", "VPN", "Docker"...}.</li>
+ *         <li>Với mỗi {@link InterfaceAddress} IPv4 thật, lấy chính xác địa chỉ Broadcast của lớp mạng đó
+ *             qua {@code interfaceAddress.getBroadcast()} (ví dụ {@code 192.168.1.255}) và mở socket
+ *             gắn trực tiếp với IP cục bộ của card mạng đó để ép Windows phát sóng đúng ra card Wi-Fi/LAN.</li>
+ *       </ul>
+ *   </li>
+ *   <li><b>Cơ chế TCP Active Subnet Scan (Fallback khi Router chặn UDP Broadcast):</b>
+ *       Nhiều Router Wi-Fi trường học/ký túc xá bật tính năng <i>Broadcast Storm Filter</i> chặn gói UDP
+ *       Broadcast nhưng vẫn cho phép kết nối TCP Unicast giữa các máy cùng lớp mạng.
+ *       Hàm {@link #scanSubnetActiveTcp(int, Consumer)} dùng {@link ExecutorService} <b>50 luồng</b>
+ *       quét nhanh dải IP {@code .1 -> .254} với timeout {@code 150ms} trên cổng TCP {@code 8889}
+ *       để tìm ra mọi Peer đang online chỉ trong chưa đầy 1 giây!</li>
+ * </ol>
  */
 public final class DiscoveryService implements AutoCloseable {
 
@@ -60,22 +83,38 @@ public final class DiscoveryService implements AutoCloseable {
     private static final String SEPARATOR = "|";
 
     private static final long BROADCAST_INTERVAL_MS = 3_000;
-    /** Hết hạn sau ~3 lần broadcast bị lỡ, tránh xóa nhầm khi mất 1-2 gói UDP. */
-    private static final long PEER_TIMEOUT_MS = 10_000;
-    private static final long PRUNE_INTERVAL_MS = 2_000;
-    /** Gói discovery rất nhỏ; 512 byte là quá đủ và an toàn dưới MTU. */
+    private static final long PEER_TIMEOUT_MS = 12_000;
+    private static final long PRUNE_INTERVAL_MS = 3_000;
     private static final int MAX_PACKET_SIZE = 512;
     private static final long THREAD_JOIN_TIMEOUT_MS = 1_000;
+
+    /** Số luồng quét song song khi chạy TCP Active Subnet Scan. */
+    private static final int ACTIVE_SCAN_THREADS = 50;
+    /** Timeout kết nối TCP (150ms) đủ nhanh cho mạng LAN nội bộ (< 5ms RTT). */
+    private static final int ACTIVE_SCAN_CONNECT_TIMEOUT_MS = 150;
+
+    /** Danh sách từ khóa nhận diện các card mạng ảo cần loại bỏ. */
+    private static final List<String> VIRTUAL_NIC_KEYWORDS = List.of(
+            "virtual", "vmware", "vbox", "wsl", "hyper-v", "tap", "vpn",
+            "vethernet", "docker", "loopback", "npcap", "wan miniport",
+            "zerotier", "tailscale", "hamachi", "radmin"
+    );
+
+    /** Thông tin một nhánh mạng LAN vật lý (IP cục bộ + Địa chỉ Broadcast của Subnet). */
+    public record LanSubnetTarget(
+            String interfaceName,
+            InetAddress localAddress,
+            InetAddress broadcastAddress
+    ) {
+    }
 
     private final int port;
     private final PeerDiscoveryListener listener;
     private final String instanceId = UUID.randomUUID().toString();
 
-    /** Danh sách Peer đã biết, key = IP. ConcurrentHashMap vì được truy cập từ nhiều luồng. */
     private final Map<String, Peer> knownPeers = new ConcurrentHashMap<>();
     private final AtomicBoolean running = new AtomicBoolean(false);
 
-    /** Tên máy được phân giải lười (lazy) trên luồng nền vì getLocalHost() có thể chậm do DNS. */
     private volatile String localHostName;
 
     private DatagramSocket listenSocket;
@@ -103,29 +142,20 @@ public final class DiscoveryService implements AutoCloseable {
         return running.get();
     }
 
-    /**
-     * Mở socket và khởi động các luồng nền. Phương thức trả về ngay (không chặn UI).
-     *
-     * @throws BindException nếu cổng UDP đã bị ứng dụng khác (hoặc một instance khác) chiếm
-     * @throws IOException   nếu không thể mở socket vì lý do khác
-     */
     public synchronized void start() throws IOException {
         if (running.get()) {
             return;
         }
 
-        // 1) Socket LẮNG NGHE: bind cố định vào cổng discovery trên mọi interface (0.0.0.0).
-        //    Nếu cổng đang bị chiếm -> BindException được ném thẳng cho tầng trên xử lý.
         DatagramSocket ls = new DatagramSocket(null);
         try {
+            ls.setReuseAddress(true);
             ls.bind(new InetSocketAddress(port));
         } catch (SocketException e) {
             ls.close();
             throw e;
         }
 
-        // 2) Socket GỬI: cổng ngẫu nhiên, bật SO_BROADCAST để được phép gửi tới địa chỉ broadcast.
-        //    Tách riêng socket gửi/nhận để luồng nghe không bao giờ bị ảnh hưởng bởi lỗi gửi.
         DatagramSocket ss;
         try {
             ss = new DatagramSocket();
@@ -139,13 +169,10 @@ public final class DiscoveryService implements AutoCloseable {
         sendSocket = ss;
         running.set(true);
 
-        // 3) Luồng nghe: daemon để JVM vẫn thoát được kể cả khi quên gọi stop().
         listenThread = new Thread(new ListenTask(), "p2p-discovery-listen");
         listenThread.setDaemon(true);
         listenThread.start();
 
-        // 4) Một luồng scheduler duy nhất chạy tuần tự BroadcastTask và PruneTask,
-        //    nên hai tác vụ này không bao giờ chạy chồng lên nhau.
         scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "p2p-discovery-broadcast");
             t.setDaemon(true);
@@ -157,21 +184,15 @@ public final class DiscoveryService implements AutoCloseable {
         LOG.info(() -> "DiscoveryService đã khởi động trên UDP port " + port);
     }
 
-    /**
-     * Dừng service an toàn: báo BYE cho các Peer, dừng luồng, đóng socket để giải phóng cổng.
-     * Có thể gọi nhiều lần (idempotent).
-     */
     public synchronized void stop() {
         if (!running.compareAndSet(true, false)) {
             return;
         }
 
-        // Gửi BYE (best-effort) để các máy khác xóa mình khỏi danh sách ngay, không phải chờ timeout.
         if (localHostName != null) {
-            sendToAllBroadcastAddresses(buildMessage(TYPE_BYE, localHostName));
+            sendDirectedSubnetBroadcasts(buildMessage(TYPE_BYE, localHostName));
         }
 
-        // Dừng scheduler trước để không còn tác vụ nào dùng sendSocket sau khi đóng.
         if (scheduler != null) {
             scheduler.shutdownNow();
             try {
@@ -181,7 +202,6 @@ public final class DiscoveryService implements AutoCloseable {
             }
         }
 
-        // Đóng listenSocket sẽ làm receive() đang chặn ném SocketException -> ListenTask tự thoát vòng lặp.
         closeQuietly(listenSocket);
         closeQuietly(sendSocket);
 
@@ -207,14 +227,160 @@ public final class DiscoveryService implements AutoCloseable {
     }
 
     // ------------------------------------------------------------------------------------------
-    // Các tác vụ nền
+    // TCP Active Subnet Scan (Fallback khi Router Wi-Fi chặn UDP Broadcast)
     // ------------------------------------------------------------------------------------------
 
-    /** Định kỳ quảng bá sự hiện diện của máy mình ra toàn mạng LAN. */
+    /**
+     * Quét chủ động toàn bộ dải IP cùng lớp mạng (từ {@code .1} đến {@code .254})
+     * bằng {@code ExecutorService} 50 luồng với kết nối TCP tới {@code tcpPort} (timeout 150ms).
+     * <p>
+     * Giúp tìm thấy các máy đang chạy P2P ngay cả khi Router Wi-Fi chặn gói tin UDP Broadcast.
+     *
+     * @param tcpPort     cổng TCP của {@link P2PServer} (mặc định 8889)
+     * @param logCallback callback ghi nhật ký ra màn hình
+     * @return danh sách các {@link Peer} tìm thấy qua quét TCP
+     */
+    public List<Peer> scanSubnetActiveTcp(int tcpPort, Consumer<String> logCallback) {
+        List<LanSubnetTarget> subnets = collectPhysicalLanSubnets();
+        Set<String> localIps = new LinkedHashSet<>();
+        Set<String> subnetPrefixes = new LinkedHashSet<>();
+
+        for (LanSubnetTarget target : subnets) {
+            String ip = target.localAddress().getHostAddress();
+            localIps.add(ip);
+            int lastDot = ip.lastIndexOf('.');
+            if (lastDot > 0) {
+                subnetPrefixes.add(ip.substring(0, lastDot + 1));
+            }
+        }
+
+        if (subnetPrefixes.isEmpty()) {
+            logScan(logCallback, "Không tìm thấy card mạng LAN vật lý nào đang kết nối IPv4.");
+            return List.of();
+        }
+
+        AtomicInteger threadIdx = new AtomicInteger(1);
+        ExecutorService scanPool = Executors.newFixedThreadPool(ACTIVE_SCAN_THREADS, r -> {
+            Thread t = new Thread(r, "p2p-tcp-subnet-scanner-" + threadIdx.getAndIncrement());
+            t.setDaemon(true);
+            return t;
+        });
+
+        List<Peer> discoveredInScan = Collections.synchronizedList(new ArrayList<>());
+        List<Callable<Void>> tasks = new ArrayList<>();
+
+        for (String prefix : subnetPrefixes) {
+            logScan(logCallback, "Đang quét sâu dải mạng " + prefix + "1 -> " + prefix + "254 trên cổng TCP "
+                    + tcpPort + " (50 luồng, timeout 150ms)...");
+
+            // Đồng thời bắn 1 loạt UDP Unicast trực tiếp tới từng IP trong dải .1 -> .254
+            // để đánh thức ListenTask của các máy khác ngay cả khi Multicast/Broadcast bị chặn.
+            if (localHostName == null) {
+                localHostName = resolveLocalHostName();
+            }
+            byte[] helloBytes = buildMessage(TYPE_HELLO, localHostName).getBytes(StandardCharsets.UTF_8);
+
+            for (int host = 1; host <= 254; host++) {
+                final String candidateIp = prefix + host;
+                if (localIps.contains(candidateIp)) {
+                    continue; // Bỏ qua chính IP của máy mình.
+                }
+
+                tasks.add(() -> {
+                    // 1) Gửi kèm 1 gói UDP Unicast trực tiếp tới candidateIp:8888
+                    DatagramSocket s = sendSocket;
+                    if (s != null && !s.isClosed()) {
+                        try {
+                            InetAddress addr = InetAddress.getByName(candidateIp);
+                            s.send(new DatagramPacket(helloBytes, helloBytes.length, addr, port));
+                        } catch (IOException ignored) {
+                        }
+                    }
+
+                    // 2) Thử kết nối TCP tới candidateIp:8889 với timeout 150ms
+                    Peer found = probePeerViaTcp(candidateIp, tcpPort);
+                    if (found != null) {
+                        discoveredInScan.add(found);
+                        Peer previous = knownPeers.put(found.ipAddress(), found);
+                        if (previous == null || !previous.hostName().equals(found.hostName())) {
+                            notifyPeerDiscovered(found);
+                        }
+                    }
+                    return null;
+                });
+            }
+        }
+
+        try {
+            List<Future<Void>> futures = scanPool.invokeAll(tasks);
+            for (Future<Void> f : futures) {
+                try {
+                    f.get();
+                } catch (Exception ignored) {
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            scanPool.shutdownNow();
+        }
+
+        return new ArrayList<>(discoveredInScan);
+    }
+
+    /**
+     * Kết nối thử tới {@code candidateIp:tcpPort} trong 150ms và gửi lệnh {@code PING}
+     * để lấy tên máy của Peer đó.
+     */
+    private Peer probePeerViaTcp(String candidateIp, int tcpPort) {
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(candidateIp, tcpPort), ACTIVE_SCAN_CONNECT_TIMEOUT_MS);
+            socket.setSoTimeout(1_000);
+            socket.setTcpNoDelay(true);
+
+            String remoteHostName = candidateIp;
+            try (DataOutputStream dos = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream()));
+                 DataInputStream dis = new DataInputStream(new BufferedInputStream(socket.getInputStream()))) {
+
+                dos.writeUTF(P2PServer.CMD_PING);
+                dos.writeUTF(localHostName != null ? localHostName : resolveLocalHostName());
+                dos.flush();
+
+                String replyHost = dis.readUTF();
+                if (replyHost != null && !replyHost.isBlank()) {
+                    remoteHostName = replyHost.trim();
+                }
+            } catch (IOException ignored) {
+                // Nếu Peer chạy phiên bản cũ chưa có lệnh PING, cổng 8889 mở vẫn chứng tỏ là Peer P2P!
+                remoteHostName = "Peer-" + candidateIp;
+            }
+
+            return new Peer(candidateIp, remoteHostName, System.currentTimeMillis());
+        } catch (IOException e) {
+            return null; // Không mở cổng TCP 8889 -> không phải Peer P2P.
+        }
+    }
+
+    /** Cho phép {@link P2PServer} báo ngược khi nhận được lệnh PING từ một máy khác. */
+    public void registerPeerFromPing(String ipAddress, String hostName) {
+        if (ipAddress == null || ipAddress.isBlank()) {
+            return;
+        }
+        String safeHost = (hostName == null || hostName.isBlank()) ? ipAddress : hostName.trim();
+        Peer fresh = new Peer(ipAddress, safeHost, System.currentTimeMillis());
+        Peer previous = knownPeers.put(ipAddress, fresh);
+        if (previous == null || !previous.hostName().equals(safeHost)) {
+            notifyPeerDiscovered(fresh);
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Các tác vụ nền (BroadcastTask, ListenTask, PruneTask)
+    // ------------------------------------------------------------------------------------------
+
     private final class BroadcastTask implements Runnable {
         @Override
         public void run() {
-            // Bắt mọi ngoại lệ: nếu một lần chạy ném lỗi, ScheduledExecutor sẽ hủy luôn các lần sau.
             try {
                 if (!running.get()) {
                     return;
@@ -222,10 +388,9 @@ public final class DiscoveryService implements AutoCloseable {
                 if (localHostName == null) {
                     localHostName = resolveLocalHostName();
                 }
-                int sent = sendToAllBroadcastAddresses(buildMessage(TYPE_HELLO, localHostName));
+                int sent = sendDirectedSubnetBroadcasts(buildMessage(TYPE_HELLO, localHostName));
                 if (sent == 0 && running.get()) {
-                    // Không gửi được tới bất kỳ địa chỉ nào: thường do rớt mạng hoặc Firewall chặn.
-                    notifyError("Không gửi được gói Discovery. Kiểm tra kết nối mạng hoặc Firewall.", null);
+                    notifyError("Không gửi được gói Discovery qua card mạng vật lý. Kiểm tra Wi-Fi/LAN hoặc Firewall.", null);
                 }
             } catch (RuntimeException e) {
                 LOG.log(Level.WARNING, "Lỗi không mong muốn trong BroadcastTask", e);
@@ -233,38 +398,31 @@ public final class DiscoveryService implements AutoCloseable {
         }
     }
 
-    /** Lắng nghe liên tục gói tin Discovery từ các Peer khác. */
     private final class ListenTask implements Runnable {
         @Override
         public void run() {
-            // Tái sử dụng một buffer duy nhất cho mọi gói tin để tránh cấp phát liên tục (giảm áp lực GC).
             byte[] buffer = new byte[MAX_PACKET_SIZE];
             DatagramSocket socket = listenSocket;
 
             while (running.get()) {
                 DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
                 try {
-                    socket.receive(packet); // Chặn cho tới khi có gói tin hoặc socket bị đóng.
+                    socket.receive(packet);
                     handlePacket(packet);
                 } catch (SocketException e) {
-                    // Đây là đường thoát BÌNH THƯỜNG khi stop() đóng socket.
-                    // Chỉ báo lỗi nếu socket bị đóng bất thường trong lúc service vẫn đang chạy.
                     if (running.get()) {
                         notifyError("Mất kết nối socket lắng nghe Discovery.", e);
                     }
                     break;
                 } catch (IOException e) {
-                    // Lỗi I/O tạm thời (vd: card mạng chập chờn) -> ghi log và tiếp tục nghe.
                     LOG.log(Level.FINE, "Lỗi I/O khi nhận gói Discovery", e);
                 } catch (RuntimeException e) {
-                    // Gói tin hỏng không được phép làm chết luồng nghe.
                     LOG.log(Level.FINE, "Bỏ qua gói Discovery không hợp lệ", e);
                 }
             }
         }
     }
 
-    /** Loại bỏ các Peer "im lặng" quá lâu (rớt mạng, tắt máy đột ngột). */
     private final class PruneTask implements Runnable {
         @Override
         public void run() {
@@ -272,10 +430,18 @@ public final class DiscoveryService implements AutoCloseable {
                 long now = System.currentTimeMillis();
                 Iterator<Map.Entry<String, Peer>> it = knownPeers.entrySet().iterator();
                 while (it.hasNext()) {
-                    Peer peer = it.next().getValue();
+                    Map.Entry<String, Peer> entry = it.next();
+                    Peer peer = entry.getValue();
                     if (now - peer.lastSeenTimestamp() > PEER_TIMEOUT_MS) {
-                        it.remove();
-                        notifyPeerLost(peer);
+                        // Trước khi xóa, kiểm tra nhanh xem cổng TCP 8889 của Peer còn sống không
+                        // (để các Peer tìm thấy qua TCP Active Scan không bị xóa nhầm khi Router chặn UDP).
+                        Peer refreshed = probePeerViaTcp(peer.ipAddress(), P2PServer.DEFAULT_PORT);
+                        if (refreshed != null) {
+                            entry.setValue(refreshed);
+                        } else {
+                            it.remove();
+                            notifyPeerLost(peer);
+                        }
                     }
                 }
             } catch (RuntimeException e) {
@@ -285,24 +451,22 @@ public final class DiscoveryService implements AutoCloseable {
     }
 
     // ------------------------------------------------------------------------------------------
-    // Xử lý gói tin
+    // Xử lý gói tin & Directed Subnet Broadcast (Loại bỏ Card mạng ảo)
     // ------------------------------------------------------------------------------------------
 
     private void handlePacket(DatagramPacket packet) {
         String text = new String(packet.getData(), packet.getOffset(), packet.getLength(), StandardCharsets.UTF_8);
-        // limit = 5: tên máy (phần cuối) được giữ nguyên dù có chứa ký tự lạ.
         String[] parts = text.split("\\|", 5);
         if (parts.length != 5 || !PROTOCOL_PREFIX.equals(parts[0]) || !PROTOCOL_VERSION.equals(parts[1])) {
-            return; // Không phải gói của ứng dụng mình -> bỏ qua.
+            return;
         }
 
         String type = parts[2];
         String senderId = parts[3];
         String hostName = parts[4].isBlank() ? "Unknown" : parts[4].trim();
 
-        // Broadcast cũng gửi ngược lại chính máy mình -> nhận diện qua instanceId và bỏ qua.
         if (instanceId.equals(senderId)) {
-            return;
+            return; // Bỏ qua gói tin của chính máy mình.
         }
 
         String ip = packet.getAddress().getHostAddress();
@@ -311,7 +475,6 @@ public final class DiscoveryService implements AutoCloseable {
         if (TYPE_HELLO.equals(type)) {
             Peer fresh = new Peer(ip, hostName, now);
             Peer previous = knownPeers.put(ip, fresh);
-            // Chỉ báo lên UI khi Peer mới xuất hiện hoặc đổi tên, tránh "spam" cập nhật mỗi 3 giây.
             if (previous == null || !previous.hostName().equals(hostName)) {
                 notifyPeerDiscovered(fresh);
             }
@@ -328,70 +491,105 @@ public final class DiscoveryService implements AutoCloseable {
     }
 
     /**
-     * Gửi một thông điệp tới 255.255.255.255 và địa chỉ broadcast riêng của từng card mạng.
+     * Gửi gói UDP Ping trực tiếp qua từng card mạng vật lý tới đúng địa chỉ Broadcast
+     * của từng Subnet ({@code interfaceAddress.getBroadcast()}, vd {@code 192.168.1.255}).
      * <p>
-     * Trên Windows, 255.255.255.255 thường chỉ đi ra card mạng mặc định; gửi thêm vào broadcast
-     * của từng subnet (vd: 192.168.1.255) giúp các máy trên Wi-Fi/Ethernet/VM đều nhận được.
-     *
-     * @return số địa chỉ gửi thành công
+     * Việc bind một {@link DatagramSocket} tạm vào đúng {@code target.localAddress()} ép hệ điều hành
+     * Windows định tuyến gói Broadcast đi ra đúng card Wi-Fi / Ethernet vật lý đó, không bao giờ
+     * bị kẹt ở card mạng ảo WSL/VMware/VirtualBox!
      */
-    private int sendToAllBroadcastAddresses(String message) {
-        DatagramSocket socket = sendSocket;
-        if (socket == null || socket.isClosed()) {
-            return 0;
-        }
+    private int sendDirectedSubnetBroadcasts(String message) {
         byte[] data = message.getBytes(StandardCharsets.UTF_8);
         int success = 0;
-        for (InetAddress target : collectBroadcastAddresses()) {
-            try {
-                socket.send(new DatagramPacket(data, data.length, target, port));
+
+        List<LanSubnetTarget> physicalSubnets = collectPhysicalLanSubnets();
+        for (LanSubnetTarget target : physicalSubnets) {
+            try (DatagramSocket nicSocket = new DatagramSocket(new InetSocketAddress(target.localAddress(), 0))) {
+                nicSocket.setBroadcast(true);
+                DatagramPacket packet = new DatagramPacket(data, data.length, target.broadcastAddress(), port);
+                nicSocket.send(packet);
                 success++;
             } catch (IOException e) {
-                // Một card mạng lỗi không được làm hỏng việc gửi qua các card còn lại.
-                LOG.log(Level.FINE, "Không gửi được broadcast tới " + target, e);
+                LOG.log(Level.FINE, "Không gửi được broadcast qua card " + target.interfaceName(), e);
             }
         }
+
+        // Nếu máy có cấu hình mạng đặc biệt không lấy được subnet broadcast, fallback về sendSocket chung.
+        if (success == 0) {
+            DatagramSocket fallbackSocket = sendSocket;
+            if (fallbackSocket != null && !fallbackSocket.isClosed()) {
+                try {
+                    InetAddress globalBroadcast = InetAddress.getByName("255.255.255.255");
+                    fallbackSocket.send(new DatagramPacket(data, data.length, globalBroadcast, port));
+                    success++;
+                } catch (IOException e) {
+                    LOG.log(Level.FINE, "Fallback broadcast 255.255.255.255 thất bại", e);
+                }
+            }
+        }
+
         return success;
     }
 
-    private static Set<InetAddress> collectBroadcastAddresses() {
-        Set<InetAddress> targets = new LinkedHashSet<>();
-        try {
-            targets.add(InetAddress.getByName("255.255.255.255"));
-        } catch (UnknownHostException ignored) {
-            // Không thể xảy ra với literal IP.
-        }
+    /**
+     * Duyệt qua tất cả {@link NetworkInterface} đang hoạt động ({@code isUp() && !isLoopback()}),
+     * bỏ qua các card mạng ảo (Virtual, VMware, VBox, WSL, Hyper-V, TAP, VPN...) và trích xuất
+     * địa chỉ Broadcast của từng Subnet IPv4 vật lý.
+     */
+    public static List<LanSubnetTarget> collectPhysicalLanSubnets() {
+        List<LanSubnetTarget> result = new ArrayList<>();
         try {
             for (NetworkInterface nif : Collections.list(NetworkInterface.getNetworkInterfaces())) {
-                if (!nif.isUp() || nif.isLoopback()) {
+                if (!nif.isUp() || nif.isLoopback() || nif.isVirtual()) {
                     continue;
                 }
-                for (InterfaceAddress address : nif.getInterfaceAddresses()) {
-                    InetAddress broadcast = address.getBroadcast(); // null với IPv6
-                    if (broadcast != null) {
-                        targets.add(broadcast);
+                if (isVirtualNetworkInterface(nif)) {
+                    continue;
+                }
+
+                for (InterfaceAddress ia : nif.getInterfaceAddresses()) {
+                    InetAddress addr = ia.getAddress();
+                    InetAddress broadcast = ia.getBroadcast();
+                    if (addr instanceof Inet4Address && !addr.isLoopbackAddress() && broadcast != null) {
+                        result.add(new LanSubnetTarget(nif.getDisplayName(), addr, broadcast));
                     }
                 }
             }
         } catch (SocketException e) {
-            LOG.log(Level.FINE, "Không liệt kê được card mạng", e);
+            LOG.log(Level.FINE, "Không liệt kê được danh sách NetworkInterface", e);
         }
-        return targets;
+        return result;
+    }
+
+    /**
+     * Kiểm tra tên hoặc mô tả của card mạng có chứa các từ khóa của card mạng ảo hay không:
+     * {@code "Virtual", "VMware", "VBox", "WSL", "Hyper-V", "TAP", "VPN"...}.
+     */
+    public static boolean isVirtualNetworkInterface(NetworkInterface nif) {
+        String name = (nif.getName() == null ? "" : nif.getName()).toLowerCase(Locale.ROOT);
+        String display = (nif.getDisplayName() == null ? "" : nif.getDisplayName()).toLowerCase(Locale.ROOT);
+        for (String keyword : VIRTUAL_NIC_KEYWORDS) {
+            if (name.contains(keyword) || display.contains(keyword)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static String resolveLocalHostName() {
         try {
             return InetAddress.getLocalHost().getHostName();
         } catch (UnknownHostException e) {
-            // Fallback khi DNS/hosts cấu hình lỗi.
             String env = System.getenv("COMPUTERNAME");
             return env != null && !env.isBlank() ? env : "Unknown-Peer";
         }
     }
 
-    // ------------------------------------------------------------------------------------------
-    // Gọi listener an toàn: lỗi ở tầng trên không được làm chết luồng mạng.
-    // ------------------------------------------------------------------------------------------
+    private static void logScan(Consumer<String> logCallback, String msg) {
+        if (logCallback != null) {
+            logCallback.accept(msg);
+        }
+    }
 
     private void notifyPeerDiscovered(Peer peer) {
         try {

@@ -72,6 +72,7 @@ public class P2PServer extends Task<Void> {
     public static final int DEFAULT_PORT = 8889;
 
     /** Các mã lệnh (Command Header) chuẩn của giao thức P2P. */
+    public static final String CMD_PING = "PING";
     public static final String CMD_LIST_FILES = "LIST_FILES";
     public static final String CMD_DOWNLOAD_FILE = "DOWNLOAD_FILE";
     public static final String CMD_DOWNLOAD_CHUNK = "DOWNLOAD_CHUNK";
@@ -91,6 +92,7 @@ public class P2PServer extends Task<Void> {
     private final Path downloadDirectory;
     private final Consumer<SharedFile> onFileReceivedCallback;
     private final Consumer<String> eventLogger;
+    private DiscoveryService discoveryService;
 
     /** Thread Pool xử lý đồng thời nhiều Peer cùng truy vấn danh sách hoặc tải các phân đoạn. */
     private final ExecutorService clientWorkerPool;
@@ -184,6 +186,7 @@ public class P2PServer extends Task<Void> {
             String command = dis.readUTF();
 
             switch (command) {
+                case CMD_PING -> handlePingCommand(dis, dos, peerIp);
                 case CMD_LIST_FILES -> handleListFilesCommand(dos);
                 case CMD_DOWNLOAD_FILE -> handleDownloadFileCommand(dis, dos, peerIp);
                 case CMD_DOWNLOAD_CHUNK -> handleDownloadChunkCommand(dis, dos, peerIp);
@@ -195,6 +198,31 @@ public class P2PServer extends Task<Void> {
         } catch (IOException e) {
             LOG.log(Level.FINE, "Kết thúc phiên giao tiếp với Peer " + peerIp + ": " + e.getMessage());
         }
+    }
+
+    /** Gắn DiscoveryService để khi nhận lệnh PING qua TCP cũng tự động ghi nhận Peer gửi. */
+    public void setDiscoveryService(DiscoveryService discoveryService) {
+        this.discoveryService = discoveryService;
+    }
+
+    /**
+     * Phản hồi lệnh {@code "PING"} phục vụ tính năng TCP Active Subnet Scan:
+     * Đọc tên máy của bên quét (để cả 2 chiều đều thấy nhau tức thì) và trả về tên máy của mình.
+     */
+    private void handlePingCommand(DataInputStream dis, DataOutputStream dos, String senderIp) throws IOException {
+        String callerHostName = dis.readUTF();
+        if (discoveryService != null) {
+            discoveryService.registerPeerFromPing(senderIp, callerHostName);
+        }
+        String myHost;
+        try {
+            myHost = java.net.InetAddress.getLocalHost().getHostName();
+        } catch (java.net.UnknownHostException e) {
+            String env = System.getenv("COMPUTERNAME");
+            myHost = (env != null && !env.isBlank()) ? env : "P2P-Node";
+        }
+        dos.writeUTF(myHost);
+        dos.flush();
     }
 
     /**
