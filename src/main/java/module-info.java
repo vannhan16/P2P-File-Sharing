@@ -1,6 +1,7 @@
 module com.p2pfilesharing {
     requires javafx.controls;
     requires javafx.fxml;
+    requires java.logging;
 
 
     opens com.p2pfilesharing to javafx.fxml;

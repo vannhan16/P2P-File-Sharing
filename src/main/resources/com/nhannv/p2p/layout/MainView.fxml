@@ -9,7 +9,6 @@
 <?import javafx.scene.control.TableView?>
 <?import javafx.scene.layout.BorderPane?>
 <?import javafx.scene.layout.HBox?>
-<?import javafx.scene.layout.Priority?>
 <?import javafx.scene.layout.VBox?>
 
 <!-- Main Dashboard: Peer list (left), shared files (center), actions & status (bottom). -->
@@ -30,18 +29,22 @@
         </HBox>
     </top>
 
-    <!-- LEFT: Online peers in the LAN -->
+    <!-- LEFT: Online peers in the LAN (fixed width) -->
     <left>
-        <VBox spacing="8" prefWidth="220"
+        <VBox spacing="8" minWidth="240" prefWidth="240" maxWidth="240"
               style="-fx-background-color: white; -fx-border-color: transparent #e5e7eb transparent transparent;">
             <padding><Insets top="12" right="12" bottom="12" left="12"/></padding>
-            <Label text="Peers đang online"
-                   style="-fx-font-weight: bold; -fx-text-fill: #374151;"/>
+            <HBox alignment="CENTER_LEFT" spacing="6">
+                <Label text="Peers đang online"
+                       style="-fx-font-weight: bold; -fx-text-fill: #374151;"/>
+                <Label fx:id="peerCountLabel" text="(0)"
+                       style="-fx-text-fill: #6b7280;"/>
+            </HBox>
             <ListView fx:id="peerListView" VBox.vgrow="ALWAYS"/>
         </VBox>
     </left>
 
-    <!-- CENTER: Shared files table -->
+    <!-- CENTER: Shared files table (populated in later milestones) -->
     <center>
         <VBox spacing="8">
             <padding><Insets top="12" right="12" bottom="12" left="12"/></padding>
@@ -65,11 +68,11 @@
         <HBox alignment="CENTER_LEFT" spacing="12"
               style="-fx-background-color: white; -fx-border-color: #e5e7eb transparent transparent transparent;">
             <padding><Insets top="10" right="16" bottom="10" left="16"/></padding>
-            <Button fx:id="chooseFileButton" text="Chọn file chia sẻ"
+            <Button fx:id="chooseFileButton" text="Chọn file"
                     onAction="#onChooseFileClicked" defaultButton="true"/>
-            <Label fx:id="statusLabel" text="Sẵn sàng" HBox.hgrow="ALWAYS" maxWidth="Infinity"
+            <Label fx:id="statusLabel" text="Trạng thái: Sẵn sàng" HBox.hgrow="ALWAYS" maxWidth="Infinity"
                    style="-fx-text-fill: #4b5563;"/>
-            <ProgressBar fx:id="transferProgressBar" progress="0" prefWidth="220"/>
+            <ProgressBar fx:id="transferProgressBar" progress="0.0" prefWidth="220"/>
         </HBox>
     </bottom>
 </BorderPane>
