@@ -2,6 +2,7 @@ package com.nhannv.p2p.network;
 
 import com.nhannv.p2p.model.Peer;
 import com.nhannv.p2p.model.SharedFile;
+import com.nhannv.p2p.util.BandwidthLimiter;
 import com.nhannv.p2p.util.HashUtil;
 import javafx.concurrent.Task;
 
@@ -142,6 +143,7 @@ public class FileDownloadTask extends Task<Boolean> {
 
                             bos.write(buffer, 0, read);
                             sha256Digest.update(buffer, 0, read);
+                            BandwidthLimiter.getInstance().throttle(read);
 
                             bytesReadTotal += read;
                             remaining -= read;

@@ -275,6 +275,7 @@ public final class DiscoveryService implements AutoCloseable {
         String cleanHost = hp.host();
         int actualPort = hp.port();
 
+        long pingStartNano = System.nanoTime();
         try (Socket socket = new Socket()) {
             socket.connect(new InetSocketAddress(cleanHost, actualPort), timeoutMs);
             socket.setSoTimeout(3_000);
@@ -300,7 +301,15 @@ public final class DiscoveryService implements AutoCloseable {
                 remoteHostName = "Peer-" + cleanHost;
             }
 
-            Peer verifiedPeer = new Peer(cleanHost, actualPort, remoteHostName, System.currentTimeMillis(), pinProtected);
+            long rttMs = Math.max(1L, (System.nanoTime() - pingStartNano) / 1_000_000L);
+            Peer verifiedPeer = new Peer(
+                    cleanHost,
+                    actualPort,
+                    remoteHostName,
+                    System.currentTimeMillis(),
+                    pinProtected,
+                    rttMs
+            );
             String peerKey = verifiedPeer.endpoint();
             Peer previous = knownPeers.put(peerKey, verifiedPeer);
             if (previous == null || !previous.hostName().equals(remoteHostName) || previous.pinProtected() != pinProtected) {

@@ -3,7 +3,11 @@ package com.nhannv.p2p.util;
 import com.nhannv.p2p.model.SharedFile;
 import javafx.concurrent.Task;
 
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
@@ -25,6 +29,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 /**
  * Quản lý thư mục chia sẻ ("Shared Folder") tích hợp <b>Java NIO {@link WatchService}</b>
@@ -223,7 +229,7 @@ public class SharedFolderManager implements AutoCloseable {
     }
 
     /**
-     * Sao chép danh sách tệp (do người dùng Kéo &amp; Thả từ ngoài màn hình vào {@code TableView})
+     * Sao chép danh sách tệp hoặc nén toàn bộ thư mục (do người dùng Kéo &amp; Thả từ ngoài màn hình vào {@code TableView})
      * vào thư mục {@code Shared} hiện tại. {@link WatchService} sẽ tự động bắt sự kiện và băm SHA-256!
      */
     public int copyDroppedFilesToSharedFolder(List<File> droppedFiles) throws IOException {
@@ -234,7 +240,13 @@ public class SharedFolderManager implements AutoCloseable {
         ensureDirectoryExists(folder);
         int copied = 0;
         for (File src : droppedFiles) {
-            if (src != null && src.exists() && src.isFile()) {
+            if (src == null || !src.exists()) {
+                continue;
+            }
+            if (src.isDirectory()) {
+                packageDirectoryToSharedZip(src);
+                copied++;
+            } else if (src.isFile()) {
                 Path target = folder.resolve(src.getName()).normalize();
                 if (!src.toPath().toAbsolutePath().normalize().equals(target)) {
                     Files.copy(src.toPath(), target, StandardCopyOption.REPLACE_EXISTING);
@@ -243,6 +255,54 @@ public class SharedFolderManager implements AutoCloseable {
             }
         }
         return copied;
+    }
+
+    /**
+     * Đóng gói toàn bộ một thư mục (bao gồm cả thư mục con) thành tệp {@code <Tên_Thư_Mục>.zip}
+     * lưu trực tiếp vào thư mục {@code Shared} hiện tại theo cơ chế đọc khối 64KB (Zero-OOM).
+     */
+    public File packageDirectoryToSharedZip(File sourceDirectory) throws IOException {
+        Objects.requireNonNull(sourceDirectory, "sourceDirectory");
+        if (!sourceDirectory.exists() || !sourceDirectory.isDirectory()) {
+            throw new IOException("Thư mục nguồn không hợp lệ: " + sourceDirectory);
+        }
+        Path folder = this.sharedFolderPath;
+        ensureDirectoryExists(folder);
+        File targetZip = folder.resolve(sourceDirectory.getName() + ".zip").toFile();
+        zipDirectoryToFile(sourceDirectory, targetZip);
+        return targetZip;
+    }
+
+    /**
+     * Nén đệ quy toàn bộ cây thư mục {@code sourceDir} thành tệp {@code destinationZip} với bộ đệm 64KB.
+     */
+    public static void zipDirectoryToFile(File sourceDir, File destinationZip) throws IOException {
+        Path rootPath = sourceDir.toPath().toAbsolutePath().normalize();
+        Path destPath = destinationZip.toPath().toAbsolutePath().normalize();
+        byte[] buffer = new byte[HashUtil.HASH_BUFFER_SIZE];
+
+        try (ZipOutputStream zos = new ZipOutputStream(
+                new BufferedOutputStream(new FileOutputStream(destinationZip), HashUtil.HASH_BUFFER_SIZE))) {
+            try (var walkStream = Files.walk(rootPath)) {
+                for (Path currentPath : (Iterable<Path>) walkStream::iterator) {
+                    if (Files.isDirectory(currentPath) || currentPath.equals(destPath)) {
+                        continue;
+                    }
+                    String relativeEntryName = sourceDir.getName() + "/"
+                            + rootPath.relativize(currentPath).toString().replace('\\', '/');
+                    zos.putNextEntry(new ZipEntry(relativeEntryName));
+                    try (BufferedInputStream bis = new BufferedInputStream(
+                            new FileInputStream(currentPath.toFile()), HashUtil.HASH_BUFFER_SIZE)) {
+                        int read;
+                        while ((read = bis.read(buffer)) != -1) {
+                            zos.write(buffer, 0, read);
+                        }
+                    }
+                    zos.closeEntry();
+                }
+            }
+            zos.flush();
+        }
     }
 
     /** Lấy danh sách tệp chia sẻ đã được băm SHA-256 gần nhất (an toàn đa luồng). */

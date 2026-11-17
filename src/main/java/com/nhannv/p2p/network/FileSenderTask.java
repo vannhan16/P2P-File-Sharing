@@ -2,6 +2,7 @@ package com.nhannv.p2p.network;
 
 import com.nhannv.p2p.model.Peer;
 import com.nhannv.p2p.model.TransferHistoryItem;
+import com.nhannv.p2p.util.BandwidthLimiter;
 import com.nhannv.p2p.util.HashUtil;
 import javafx.concurrent.Task;
 
@@ -111,7 +112,7 @@ public class FileSenderTask extends Task<Void> {
                 dos.writeUTF(authPin);
                 dos.flush();
 
-                // Đọc phản hồi xác thực PIN từ P2PServer.
+                // Đọc phản hồi xác thực PIN & Phê duyệt Push từ P2PServer.
                 String authResponse = dis.readUTF();
                 if (P2PServer.STATUS_AUTH_FAILED.equals(authResponse)) {
                     updateProgress(0.0, 1.0);
@@ -119,6 +120,14 @@ public class FileSenderTask extends Task<Void> {
                     updateMessage("Trạng thái: " + msg);
                     logEvent(msg);
                     recordHistory(fileName, totalBytes, endpointStr, 0.0, 1L, "Lỗi: Sai mã PIN (AUTH_FAILED)");
+                    throw new IOException(msg);
+                }
+                if (P2PServer.STATUS_REJECTED.equals(authResponse)) {
+                    updateProgress(0.0, 1.0);
+                    String msg = "Peer " + endpointStr + " đã từ chối nhận tệp \"" + fileName + "\"!";
+                    updateMessage("Trạng thái: " + msg);
+                    logEvent(msg);
+                    recordHistory(fileName, totalBytes, endpointStr, 0.0, 1L, "Từ chối bởi người nhận");
                     throw new IOException(msg);
                 }
 
@@ -136,6 +145,7 @@ public class FileSenderTask extends Task<Void> {
                     }
 
                     dos.write(buffer, 0, bytesRead);
+                    BandwidthLimiter.getInstance().throttle(bytesRead);
                     bytesSent += bytesRead;
 
                     updateProgress(bytesSent, Math.max(totalBytes, 1));

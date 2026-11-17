@@ -3,6 +3,8 @@ package com.nhannv.p2p.network;
 import com.nhannv.p2p.model.Peer;
 import com.nhannv.p2p.model.SharedFile;
 import com.nhannv.p2p.model.TransferHistoryItem;
+import com.nhannv.p2p.util.BandwidthLimiter;
+import com.nhannv.p2p.util.CryptoUtil;
 import com.nhannv.p2p.util.HashUtil;
 import com.nhannv.p2p.util.SharedFolderManager;
 import javafx.concurrent.Task;
@@ -35,6 +37,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.DoubleConsumer;
 import java.util.logging.Level;
@@ -60,10 +64,12 @@ public class P2PServer extends Task<Void> {
     public static final String CMD_DOWNLOAD_FILE = "DOWNLOAD_FILE";
     public static final String CMD_DOWNLOAD_CHUNK = "DOWNLOAD_CHUNK";
     public static final String CMD_PUSH_FILE = "PUSH_FILE";
+    public static final String CMD_CHAT_MESSAGE = "CHAT_MESSAGE";
 
-    /** Các hằng số phản hồi xác thực Security PIN. */
+    /** Các hằng số phản hồi xác thực Security PIN & Phê duyệt Push. */
     public static final String STATUS_OK = "OK";
     public static final String STATUS_AUTH_FAILED = "AUTH_FAILED";
+    public static final String STATUS_REJECTED = "REJECTED_BY_USER";
     public static final long CODE_AUTH_FAILED = -401L;
 
     /** Kích thước mỗi khối (Chunk size) đọc/ghi mạng và đĩa = 64 KB. */
@@ -83,10 +89,13 @@ public class P2PServer extends Task<Void> {
     private DiscoveryService discoveryService;
     private Consumer<TransferHistoryItem> historyCallback;
     private DoubleConsumer speedSampleCallback;
+    private BiConsumer<String, String> chatMessageCallback;
+    private BiFunction<String, Long, Boolean> pushApprovalHandler;
 
-    /** Cấu hình Security PIN (4 chữ số) của máy chủ. */
+    /** Cấu hình Security PIN (4 chữ số) và chế độ hỏi xác nhận trước khi nhận tệp Push. */
     private volatile boolean securityPinEnabled = false;
     private volatile String securityPinCode = "";
+    private volatile boolean askBeforeAcceptingPush = false;
 
     /** Thread Pool xử lý đồng thời nhiều Peer cùng truy vấn danh sách hoặc tải các phân đoạn. */
     private final ExecutorService clientWorkerPool;
@@ -158,6 +167,22 @@ public class P2PServer extends Task<Void> {
         this.speedSampleCallback = speedSampleCallback;
     }
 
+    public void setChatMessageCallback(BiConsumer<String, String> chatMessageCallback) {
+        this.chatMessageCallback = chatMessageCallback;
+    }
+
+    public void setPushApprovalHandler(BiFunction<String, Long, Boolean> pushApprovalHandler) {
+        this.pushApprovalHandler = pushApprovalHandler;
+    }
+
+    public void setAskBeforeAcceptingPush(boolean askBeforeAcceptingPush) {
+        this.askBeforeAcceptingPush = askBeforeAcceptingPush;
+    }
+
+    public boolean isAskBeforeAcceptingPush() {
+        return askBeforeAcceptingPush;
+    }
+
     @Override
     protected Void call() {
         try {
@@ -216,6 +241,7 @@ public class P2PServer extends Task<Void> {
                 case CMD_DOWNLOAD_FILE -> handleDownloadFileCommand(dis, dos, peerIp);
                 case CMD_DOWNLOAD_CHUNK -> handleDownloadChunkCommand(dis, dos, peerIp);
                 case CMD_PUSH_FILE -> handlePushFileCommand(dis, dos, peerIp);
+                case CMD_CHAT_MESSAGE -> handleChatMessageCommand(dis, dos, peerIp);
                 default -> handleLegacyPushFile(command, dis, peerIp);
             }
         } catch (EOFException e) {
@@ -287,6 +313,7 @@ public class P2PServer extends Task<Void> {
             int bytesRead;
             while ((bytesRead = fis.read(buffer)) != -1 && !isCancelled()) {
                 dos.write(buffer, 0, bytesRead);
+                BandwidthLimiter.getInstance().throttle(bytesRead);
                 totalSent += bytesRead;
                 double speed = calculateSpeedMBps(totalSent, startNano);
                 reportSpeedSample(speed);
@@ -362,6 +389,7 @@ public class P2PServer extends Task<Void> {
                     break;
                 }
                 dos.write(buffer, 0, bytesRead);
+                BandwidthLimiter.getInstance().throttle(bytesRead);
                 remaining -= bytesRead;
                 sentBytes += bytesRead;
 
@@ -380,7 +408,7 @@ public class P2PServer extends Task<Void> {
     }
 
     /**
-     * Xử lý lệnh {@code "PUSH_FILE"} kèm xác thực mã PIN bảo mật.
+     * Xử lý lệnh {@code "PUSH_FILE"} kèm xác thực mã PIN bảo mật và hộp thoại Phê duyệt nhận tệp (Milestone 6).
      */
     private void handlePushFileCommand(DataInputStream dis, DataOutputStream dos, String senderIp)
             throws IOException {
@@ -397,9 +425,96 @@ public class P2PServer extends Task<Void> {
             return;
         }
 
+        if (askBeforeAcceptingPush && pushApprovalHandler != null) {
+            Boolean approved = pushApprovalHandler.apply(senderIp + " -> " + rawFileName, totalBytes);
+            if (!Boolean.TRUE.equals(approved)) {
+                dos.writeUTF(STATUS_REJECTED);
+                dos.flush();
+                logServerEvent("Người dùng đã TỪ CHỐI nhận tệp Push \"" + rawFileName + "\" từ Peer " + senderIp);
+                return;
+            }
+        }
+
         dos.writeUTF(STATUS_OK);
         dos.flush();
         receivePushedStream(rawFileName, totalBytes, expectedSha256, dis, senderIp);
+    }
+
+    /**
+     * Xử lý lệnh {@code "CHAT_MESSAGE"} được mã hóa đầu-cuối bằng AES-256-GCM (Milestone 6 - Gói 1 &amp; Gói 5).
+     */
+    private void handleChatMessageCommand(DataInputStream dis, DataOutputStream dos, String senderIp)
+            throws IOException {
+        String senderName = dis.readUTF();
+        String clientPin = dis.readUTF();
+        String encryptedBase64 = dis.readUTF();
+
+        if (!isPinAuthorized(clientPin)) {
+            dos.writeUTF(STATUS_AUTH_FAILED);
+            dos.flush();
+            logServerEvent("Từ chối tin nhắn Chat từ " + senderIp + " (Sai mã PIN)!");
+            return;
+        }
+
+        String decryptedText;
+        try {
+            String keyPin = (securityPinEnabled && !securityPinCode.isEmpty()) ? securityPinCode : clientPin;
+            decryptedText = CryptoUtil.decryptTextFromBase64(encryptedBase64, keyPin);
+        } catch (Exception e) {
+            // Fallback nếu bên gửi dùng khóa mặc định khi không bật PIN
+            try {
+                decryptedText = CryptoUtil.decryptTextFromBase64(encryptedBase64, "");
+            } catch (Exception ex) {
+                dos.writeUTF(STATUS_AUTH_FAILED);
+                dos.flush();
+                return;
+            }
+        }
+
+        dos.writeUTF(STATUS_OK);
+        dos.flush();
+
+        String senderDisplay = senderName + " (" + senderIp + ")";
+        logServerEvent("[CHAT AES-256] Nhận tin nhắn từ " + senderDisplay + ": " + decryptedText);
+        BiConsumer<String, String> cb = this.chatMessageCallback;
+        if (cb != null) {
+            cb.accept(senderDisplay, decryptedText);
+        }
+    }
+
+    /**
+     * Gửi một tin nhắn văn bản P2P được mã hóa đầu-cuối bằng <b>AES-256-GCM</b> tới {@link Peer} đích.
+     */
+    public static void sendChatMessageToPeer(
+            Peer targetPeer,
+            String senderName,
+            String plainMessage,
+            String authPin
+    ) throws Exception {
+        Objects.requireNonNull(targetPeer, "targetPeer");
+        String pin = (authPin == null) ? "" : authPin.trim();
+        String encryptedPayload = CryptoUtil.encryptTextToBase64(plainMessage, pin);
+
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(targetPeer.ipAddress(), targetPeer.tcpPort()), LIST_CONNECT_TIMEOUT_MS);
+            socket.setSoTimeout(SOCKET_TIMEOUT_MS);
+            socket.setTcpNoDelay(true);
+
+            try (DataOutputStream dos = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream()));
+                 DataInputStream dis = new DataInputStream(new BufferedInputStream(socket.getInputStream()))) {
+
+                dos.writeUTF(CMD_CHAT_MESSAGE);
+                dos.writeUTF(senderName == null || senderName.isBlank() ? "Peer" : senderName);
+                dos.writeUTF(pin);
+                dos.writeUTF(encryptedPayload);
+                dos.flush();
+
+                String response = dis.readUTF();
+                if (STATUS_AUTH_FAILED.equals(response)) {
+                    throw new IOException("Peer " + targetPeer.endpoint() + " từ chối tin nhắn do sai mã PIN (AUTH_FAILED)!");
+                }
+            }
+        }
     }
 
     private void handleLegacyPushFile(String rawFileName, DataInputStream dis, String senderIp)
@@ -447,6 +562,7 @@ public class P2PServer extends Task<Void> {
                 }
                 bos.write(buffer, 0, bytesRead);
                 digest.update(buffer, 0, bytesRead);
+                BandwidthLimiter.getInstance().throttle(bytesRead);
 
                 totalBytesRead += bytesRead;
                 remaining -= bytesRead;

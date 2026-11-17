@@ -9,6 +9,7 @@ import com.nhannv.p2p.network.DownloadManager;
 import com.nhannv.p2p.network.FileSenderTask;
 import com.nhannv.p2p.network.P2PServer;
 import com.nhannv.p2p.network.PeerDiscoveryListener;
+import com.nhannv.p2p.util.BandwidthLimiter;
 import com.nhannv.p2p.util.FirewallUtil;
 import com.nhannv.p2p.util.SharedFolderManager;
 import javafx.animation.KeyFrame;
@@ -26,7 +27,9 @@ import javafx.scene.chart.NumberAxis;
 import javafx.scene.chart.XYChart;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
+import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckBox;
+import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
@@ -35,8 +38,13 @@ import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
+import javafx.scene.input.Clipboard;
+import javafx.scene.input.ClipboardContent;
 import javafx.scene.input.Dragboard;
 import javafx.scene.input.TransferMode;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
+import javafx.scene.layout.Region;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.FileChooser;
 import javafx.stage.Window;
@@ -48,6 +56,8 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.net.BindException;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -57,27 +67,31 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Controller trung tâm của {@code MainView.fxml} (Hoàn thiện toàn diện Milestone 1 -> Milestone 5).
+ * Controller trung tâm của {@code MainView.fxml} (Hoàn thiện toàn diện Milestone 1 -> Milestone 6 Enterprise).
  *
- * <h2>Điểm nhấn kỹ thuật mới ở Milestone 5 (Phục vụ thuyết trình &amp; vấn đáp đồ án)</h2>
+ * <h2>5 Gói Tính Năng Nâng Cao ở Milestone 6 (Dành cho Thuyết trình &amp; Vấn đáp Đồ án)</h2>
  * <ol>
- *   <li><b>Kết nối xuyên Internet ({@code host:port}) &amp; Mã PIN bảo mật 4 chữ số:</b>
- *       Hỗ trợ nhập cả IP LAN, Radmin VPN ({@code 26.x.x.x}) lẫn TCP Tunnel ngoài Internet
- *       (ví dụ {@code 0.tcp.ap.ngrok.io:14523} hoặc Playit.gg). Tích hợp xác thực mã PIN 4 số
- *       trên các lệnh {@code DOWNLOAD_FILE}, {@code DOWNLOAD_CHUNK}, {@code PUSH_FILE}.</li>
- *   <li><b>Tự động đồng bộ thư mục chia sẻ ({@link java.nio.file.WatchService}):</b>
- *       Daemon Thread lắng nghe sự kiện {@code ENTRY_CREATE}, {@code ENTRY_DELETE}, {@code ENTRY_MODIFY}
- *       của hệ điều hành, tự động băm lại SHA-256 và cập nhật {@code sharedFileTable} qua {@code Platform.runLater()}.</li>
- *   <li><b>Kéo thả tệp (Drag &amp; Drop) &amp; Biểu đồ tốc độ thời gian thực ({@link AreaChart}):</b>
- *       Kéo thả tệp vào bảng giữa để chia sẻ ngay lập tức hoặc thả vào tên một Peer ở cột trái để Push tệp.
- *       Biểu đồ {@code AreaChart<Number, Number>} cập nhật tốc độ truyền tải (MB/s) mỗi giây với cửa sổ trượt 30 giây.</li>
- *   <li><b>Bảng Lịch sử truyền tải &amp; Xuất báo cáo hiệu năng CSV:</b>
- *       Ghi lại toàn bộ thông số phiên truyền tải (Thời gian, Tên tệp, Dung lượng, Peer, Chiều truyền,
- *       Tốc độ TB MB/s, Thời gian hoàn thành ms, Kết quả SHA-256) và cho phép xuất ra tệp {@code .csv}.</li>
+ *   <li><b>Gói 1 — Bảo mật AES-256-GCM &amp; Phê duyệt Nhận tệp Push:</b>
+ *       Mã hóa đầu-cuối tin nhắn/dữ liệu bằng {@code AES/GCM/NoPadding} (khóa 256-bit dẫn xuất qua PBKDF2)
+ *       và hỗ trợ hộp thoại hỏi ý kiến người nhận (<i>Accept / Reject</i>) trước khi nhận tệp Push.</li>
+ *   <li><b>Gói 2 — Bản đồ 32 mảnh tải (BitTorrent Chunk Matrix UI) &amp; Swarm Failover:</b>
+ *       Trực quan hóa 32 phân đoạn của tệp đang tải theo thời gian thực và tự động chuyển hướng sang Peer dự phòng
+ *       nếu một Peer bị ngắt kết nối giữa chừng.</li>
+ *   <li><b>Gói 3 — Chia sẻ &amp; Gửi toàn bộ Thư mục (On-the-fly Folder ZIP Packaging):</b>
+ *       Cho phép chọn hoặc kéo thả nguyên một thư mục dự án để tự động nén thành {@code .zip} (bộ đệm 64KB)
+ *       và chia sẻ/Push ngay lập tức.</li>
+ *   <li><b>Gói 4 — Giới hạn băng thông chủ động (Token Bucket QoS) &amp; Đo độ trễ Ping RTT (ms):</b>
+ *       Điều tiết tốc độ truyền theo ngưỡng chọn sẵn ({@code Không giới hạn}, {@code 20 MB/s}, {@code 10 MB/s},
+ *       {@code 5 MB/s}, {@code 2 MB/s}, {@code 512 KB/s}) và đo độ trễ RTT {@code ms} tới từng Peer.</li>
+ *   <li><b>Gói 5 — Kênh Chat P2P Bảo mật &amp; 1-Click Invite Token ({@code host:port#PIN}):</b>
+ *       Sao chép nhanh chuỗi kết nối kèm PIN vào Clipboard và trò chuyện P2P trực tiếp không cần phần mềm thứ ba.</li>
  * </ol>
  */
 public class MainController implements PeerDiscoveryListener {
@@ -98,7 +112,7 @@ public class MainController implements PeerDiscoveryListener {
     @FXML
     private Button themeToggleButton;
 
-    // --- TÁC VỤ 1: Ô nhập host:port & Security PIN 4 chữ số ---
+    // --- Cột trái: Ô nhập host:port#PIN, Security PIN, Push Approval & Danh sách Peer ---
     @FXML
     private TextField directIpTextField;
 
@@ -112,6 +126,12 @@ public class MainController implements PeerDiscoveryListener {
     private TextField myPinTextField;
 
     @FXML
+    private Button copyInviteTokenButton;
+
+    @FXML
+    private CheckBox askPushConfirmCheckBox;
+
+    @FXML
     private TextField peerPinTextField;
 
     @FXML
@@ -123,8 +143,12 @@ public class MainController implements PeerDiscoveryListener {
     @FXML
     private Button deepScanButton;
 
+    // --- Tab 1: Tìm kiếm, Chia sẻ thư mục ZIP, Bảng 5 cột, BitTorrent 32-Chunk Matrix & AreaChart ---
     @FXML
     private TextField searchTextField;
+
+    @FXML
+    private Button shareFolderZipButton;
 
     @FXML
     private Button chooseSharedFolderButton;
@@ -150,7 +174,9 @@ public class MainController implements PeerDiscoveryListener {
     @FXML
     private TableColumn<SharedFile, String> fileHashColumn;
 
-    // --- TÁC VỤ 3: Biểu đồ tốc độ thời gian thực (AreaChart 30s) ---
+    @FXML
+    private HBox chunkMatrixContainer;
+
     @FXML
     private AreaChart<Number, Number> speedTelemetryChart;
 
@@ -163,7 +189,7 @@ public class MainController implements PeerDiscoveryListener {
     @FXML
     private TextArea networkLogArea;
 
-    // --- TÁC VỤ 4: Bảng Lịch sử truyền tải & Xuất báo cáo CSV ---
+    // --- Tab 2: Bảng Lịch sử truyền tải & Xuất báo cáo CSV ---
     @FXML
     private Label historyCountLabel;
 
@@ -197,6 +223,14 @@ public class MainController implements PeerDiscoveryListener {
     @FXML
     private TableColumn<TransferHistoryItem, String> historyHashStatusColumn;
 
+    // --- Tab 3: Kênh Chat P2P Bảo mật AES-256-GCM ---
+    @FXML
+    private TextArea chatHistoryArea;
+
+    @FXML
+    private TextField chatInputField;
+
+    // --- Thanh điều khiển dưới cùng (Bottom Bar + QoS Bandwidth Limiter) ---
     @FXML
     private Button downloadSelectedButton;
 
@@ -211,6 +245,12 @@ public class MainController implements PeerDiscoveryListener {
 
     @FXML
     private Button chooseFileButton;
+
+    @FXML
+    private Button pushFolderButton;
+
+    @FXML
+    private ComboBox<String> bandwidthLimitComboBox;
 
     @FXML
     private Label statusLabel;
@@ -233,6 +273,9 @@ public class MainController implements PeerDiscoveryListener {
     /** Danh sách lưu lịch sử truyền tải tệp (Gửi / Nhận / Swarm) phục vụ Tab Thống kê & Xuất CSV. */
     private final ObservableList<TransferHistoryItem> historyList = FXCollections.observableArrayList();
 
+    /** Mảng 32 ô vuông hiển thị trực quan trạng thái từng phân đoạn tải (BitTorrent Chunk Matrix). */
+    private final Region[] chunkMatrixCells = new Region[DownloadManager.MATRIX_CHUNK_COUNT];
+
     private final SharedFolderManager sharedFolderManager = new SharedFolderManager();
     private final DownloadManager downloadManager = new DownloadManager(this::appendNetworkLog);
     private DiscoveryService discoveryService;
@@ -241,7 +284,6 @@ public class MainController implements PeerDiscoveryListener {
     /** Lưu mẫu tốc độ truyền tải tức thời (MB/s) mới nhất từ luồng tải/gửi để vẽ lên AreaChart. */
     private final AtomicReference<Double> latestSpeedSampleMBps = new AtomicReference<>(0.0);
 
-    /** Chuỗi dữ liệu (Series) của biểu đồ AreaChart và bộ đếm giây (Tick). */
     private XYChart.Series<Number, Number> speedSeries;
     private Timeline speedChartTimeline;
     private int chartElapsedSeconds = 0;
@@ -261,17 +303,16 @@ public class MainController implements PeerDiscoveryListener {
             }
         });
 
-        // Gắn tính năng Kéo thả tệp (Drag & Drop) trực tiếp vào từng dòng Peer trên peerListView
         setupPeerListDragAndDrop();
 
-        // --- 2. Tab 1: Bảng tệp chia sẻ 5 cột + Kéo thả tệp vào bảng để chia sẻ ---
+        // --- 2. Tab 1: Bảng tệp chia sẻ 5 cột + Kéo thả Tệp/Thư mục ---
         fileNameColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().fileName()));
         fileSizeColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().formattedSize()));
         fileSourcesColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().peerCountDisplay()));
         fileOwnerColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().ownerDisplay()));
         fileHashColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().sha256Hash()));
         sharedFileTable.setPlaceholder(new Label(
-                "Chưa có tệp nào — Hãy kéo thả tệp từ Windows Explorer vào bảng này để chia sẻ ngay!"));
+                "Chưa có tệp nào — Kéo thả Tệp hoặc cả Thư mục từ Windows Explorer vào bảng này để chia sẻ ngay!"));
 
         filteredFileList = new FilteredList<>(masterFileList, file -> true);
         sharedFileTable.setItems(filteredFileList);
@@ -281,23 +322,26 @@ public class MainController implements PeerDiscoveryListener {
             filteredFileList.setPredicate(file -> matchesSearchKeyword(file, keyword));
         });
 
-        // Gắn tính năng Kéo thả tệp (Drag & Drop) vào bảng sharedFileTable
         setupSharedTableDragAndDrop();
 
-        // --- 3. Tab 1 (Dưới): Khởi tạo Biểu đồ tốc độ thời gian thực AreaChart (30 giây) ---
+        // --- 3. Khởi tạo Bản đồ 32 mảnh tải (BitTorrent Chunk Matrix) & Biểu đồ tốc độ AreaChart ---
+        initializeChunkMatrixBar();
         initializeSpeedTelemetryChart();
 
-        // --- 4. Tab 2: Khởi tạo Bảng Lịch sử truyền tải & Thống kê hiệu năng ---
+        // --- 4. Khởi tạo Bảng Lịch sử truyền tải & Bộ giới hạn băng thông QoS ---
         initializeHistoryTable();
+        initializeBandwidthLimiterComboBox();
 
-        // Cấu hình callback cho DownloadManager (cung cấp PIN, mẫu tốc độ MB/s và lịch sử truyền tải)
+        // Cấu hình callback cho DownloadManager
         downloadManager.setAuthPinSupplier(this::getPeerAuthPinInput);
         downloadManager.setSpeedSampleCallback(this::recordSpeedSample);
         downloadManager.setHistoryCallback(this::recordTransferHistory);
+        downloadManager.setChunkMatrixCallback(this::updateChunkMatrixCell);
 
         updateSharedFolderLabel();
         refreshHeaderIpBadges();
-        appendNetworkLog("Khởi tạo hệ thống P2P File Sharing (M5: Tunnel host:port, Security PIN, WatchService, AreaChart & CSV)...");
+        appendNetworkLog("Khởi tạo P2P File Sharing (M6 Enterprise: AES-256-GCM, BitTorrent 32-Chunk Matrix, Folder ZIP, QoS & Chat)...");
+        appendChatLog("Hệ thống", "Kênh Chat P2P bảo mật đầu-cuối (AES-256-GCM) đã sẵn sàng.");
         logDetectedPhysicalSubnets();
         checkFirewallStatusAsync();
 
@@ -311,13 +355,9 @@ public class MainController implements PeerDiscoveryListener {
     }
 
     // ------------------------------------------------------------------------------------------
-    // TÁC VỤ 1: HỖ TRỢ KẾT NỐI XUYÊN INTERNET (HOST:PORT) & MÃ PIN BẢO MẬT 4 SỐ
+    // GÓI 1 & GÓI 5: BẢO MẬT PIN, HỘP THOẠI PHÊ DUYỆT PUSH & MÃ MỜI 1-CLICK (host:port#PIN)
     // ------------------------------------------------------------------------------------------
 
-    /**
-     * Sinh ngẫu nhiên một mã PIN 4 chữ số khi khởi động ứng dụng và gắn sự kiện đồng bộ
-     * cấu hình bảo mật xuống {@link P2PServer}.
-     */
     private void initializeSecurityPinControls() {
         String randomPin = String.format("%04d", ThreadLocalRandom.current().nextInt(10_000));
         if (myPinTextField != null) {
@@ -325,10 +365,6 @@ public class MainController implements PeerDiscoveryListener {
         }
     }
 
-    /**
-     * Được gọi khi người dùng bật/tắt {@code CheckBox("Bật mã PIN bảo vệ")} hoặc sửa mã PIN.
-     * Cập nhật ngay lập tức trạng thái khóa PIN trên {@link P2PServer}.
-     */
     @FXML
     private void handlePinConfigChanged() {
         boolean enabled = pinEnableCheckBox != null && pinEnableCheckBox.isSelected();
@@ -342,7 +378,7 @@ public class MainController implements PeerDiscoveryListener {
 
         if (enabled) {
             appendNetworkLog("[BẢO MẬT PIN] Đã BẬT bảo vệ bằng mã PIN (" + pin
-                    + "). Mọi yêu cầu tải/gửi tệp tới máy bạn phải kèm đúng mã PIN này.");
+                    + "). Mọi yêu cầu tải/gửi tệp/chat tới máy bạn phải kèm đúng mã PIN này.");
             setStatus("Đã bật mã PIN bảo vệ (" + pin + ").");
         } else {
             appendNetworkLog("[BẢO MẬT PIN] Đã TẮT mã PIN bảo vệ — cho phép truyền tệp tự do.");
@@ -350,9 +386,72 @@ public class MainController implements PeerDiscoveryListener {
         }
     }
 
+    @FXML
+    private void handlePushConfirmConfigChanged() {
+        boolean askConfirm = askPushConfirmCheckBox != null && askPushConfirmCheckBox.isSelected();
+        if (p2pServer != null) {
+            p2pServer.setAskBeforeAcceptingPush(askConfirm);
+        }
+        String msg = askConfirm
+                ? "Đã BẬT chế độ hỏi xác nhận (Accept/Reject) trước khi nhận tệp Push từ Peer khác."
+                : "Đã TẮT chế độ hỏi xác nhận — tự động lưu tệp Push hợp lệ vào Downloads/.";
+        appendNetworkLog(msg);
+        setStatus(msg);
+    }
+
     /**
-     * Lấy mã PIN đối tác mà người dùng đã nhập ở ô {@code peerPinTextField} (nếu Peer đích có bật khóa PIN).
+     * Hiển thị hộp thoại hỏi ý kiến người dùng trên luồng JavaFX trước khi cho phép Peer khác Push tệp vào máy.
      */
+    private Boolean promptUserForPushApproval(String senderAndFile, Long fileSizeBytes) {
+        CompletableFuture<Boolean> decisionFuture = new CompletableFuture<>();
+        runOnFxThread(() -> {
+            Alert alert = new Alert(Alert.AlertType.CONFIRMATION);
+            alert.setTitle("Yêu cầu gửi tệp trực tiếp (Incoming Push Request)");
+            alert.setHeaderText("Một Peer muốn gửi tệp vào máy của bạn!");
+            alert.setContentText("Thông tin tệp: " + senderAndFile
+                    + "\nDung lượng: " + SharedFile.formatSize(fileSizeBytes == null ? 0L : fileSizeBytes)
+                    + "\n\nBạn có đồng ý nhận tệp này vào thư mục Downloads/ không?");
+            ButtonType acceptBtn = new ButtonType("Đồng ý nhận (Accept)");
+            ButtonType rejectBtn = new ButtonType("Từ chối (Reject)");
+            alert.getButtonTypes().setAll(acceptBtn, rejectBtn);
+
+            Optional<ButtonType> result = alert.showAndWait();
+            decisionFuture.complete(result.isPresent() && result.get() == acceptBtn);
+        });
+
+        try {
+            return decisionFuture.get(30, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Sao chép nhanh <b>Mã Mời Kết Nối 1-Click</b> định dạng {@code IP:8889#PIN} vào Clipboard hệ thống.
+     * Bạn cùng nhóm chỉ cần dán chuỗi này vào ô kết nối là tự động điền cả IP, Port lẫn mã PIN!
+     */
+    @FXML
+    private void handleCopyInviteToken() {
+        String radminIp = DiscoveryService.detectRadminVpnIp();
+        String lanIp = DiscoveryService.detectLocalLanIp();
+        String bestHost = (radminIp != null && radminIp.startsWith("26.")) ? radminIp : lanIp;
+        String myPin = (myPinTextField != null && myPinTextField.getText() != null)
+                ? myPinTextField.getText().trim()
+                : "";
+        boolean pinOn = pinEnableCheckBox != null && pinEnableCheckBox.isSelected() && !myPin.isEmpty();
+
+        String token = bestHost + ":" + P2PServer.DEFAULT_PORT + (pinOn ? ("#" + myPin) : "");
+
+        ClipboardContent content = new ClipboardContent();
+        content.putString(token);
+        Clipboard.getSystemClipboard().setContent(content);
+
+        String msg = "Đã copy Mã Mời 1-Click vào Clipboard: " + token
+                + " (Hãy gửi mã này cho bạn cùng nhóm dán vào ô Kết nối!)";
+        appendNetworkLog(msg);
+        setStatus(msg);
+    }
+
     private String getPeerAuthPinInput() {
         if (peerPinTextField == null || peerPinTextField.getText() == null) {
             return "";
@@ -361,14 +460,8 @@ public class MainController implements PeerDiscoveryListener {
     }
 
     /**
-     * Xử lý sự kiện khi người dùng nhập địa chỉ {@code host:port} (ví dụ: {@code 0.tcp.ap.ngrok.io:14523},
-     * {@code 192.168.1.10:8889}, hoặc {@code 26.x.x.x}) và bấm nút <b>"Kết nối"</b>:
-     * <ol>
-     *   <li>Tách {@code host} và {@code port} qua {@link Peer#parseHostPort(String, int)} (mặc định cổng 8889 nếu không nhập {@code :port}).</li>
-     *   <li>Nếu kết nối dùng cổng mặc định 8889 (LAN / Radmin VPN), gửi thêm gói UDP Direct Ping tới cổng 8888.</li>
-     *   <li>Mở kết nối TCP tới {@code host:port} để xác thực {@code PING} và lấy danh sách tệp {@code LIST_FILES},
-     *       lưu riêng {@code tcpPort} trong đối tượng {@link Peer} để hỗ trợ tải/gửi qua Internet Tunnel.</li>
-     * </ol>
+     * Kết nối trực tiếp qua {@code host:port} hoặc <b>Mã mời 1-Click {@code host:port#PIN}</b>.
+     * Nếu chuỗi nhập có chứa {@code #PIN}, tự động tách mã PIN điền vào ô {@code peerPinTextField}!
      */
     @FXML
     private void handleConnectDirectIp() {
@@ -377,19 +470,25 @@ public class MainController implements PeerDiscoveryListener {
         if (trimmedInput.isEmpty()) {
             Alert alert = new Alert(Alert.AlertType.WARNING);
             alert.setTitle("Chưa nhập địa chỉ kết nối");
-            alert.setHeaderText("Vui lòng nhập IP hoặc host:port (Radmin VPN / Ngrok / Playit.gg / LAN)!");
-            alert.setContentText("Ví dụ:\n• Radmin VPN / LAN: 26.45.12.88 hoặc 192.168.1.10:8889\n• Internet TCP Tunnel: 0.tcp.ap.ngrok.io:14523");
+            alert.setHeaderText("Vui lòng nhập IP, host:port hoặc Mã mời (host:port#PIN)!");
+            alert.setContentText("Ví dụ:\n• Mã mời 1-Click: 26.45.12.88:8889#4821\n• Internet TCP Tunnel: 0.tcp.ap.ngrok.io:14523");
             alert.showAndWait();
             return;
         }
 
-        Peer.HostPort target = Peer.parseHostPort(trimmedInput, P2PServer.DEFAULT_PORT);
+        Peer.InviteToken invite = Peer.parseInviteToken(trimmedInput, P2PServer.DEFAULT_PORT);
+        if (!invite.pin().isEmpty() && peerPinTextField != null) {
+            peerPinTextField.setText(invite.pin());
+            appendNetworkLog("Đã tự động nhận diện mã PIN đối tác (" + invite.pin() + ") từ Mã Mời!");
+        }
+
+        Peer.HostPort target = invite.toHostPort();
         String targetEndpoint = target.toEndpointString();
 
         if (connectDirectIpButton != null) {
             connectDirectIpButton.setDisable(true);
         }
-        appendNetworkLog("Đang kết nối trực tiếp tới " + targetEndpoint + " (Hỗ trợ LAN / Radmin VPN / TCP Tunnel)...");
+        appendNetworkLog("Đang kết nối trực tiếp tới " + targetEndpoint + " (Đo độ trễ RTT & truy vấn LIST_FILES)...");
 
         Task<List<SharedFile>> connectTask = new Task<>() {
             private Peer connectedPeer;
@@ -399,12 +498,10 @@ public class MainController implements PeerDiscoveryListener {
                 updateProgress(-1, 1);
                 updateMessage("Trạng thái: Đang kết nối TCP tới " + targetEndpoint + "...");
 
-                // Bước 1: Nếu dùng cổng mặc định 8889 (LAN/Radmin), bắn thêm gói UDP Unicast PING tới cổng 8888
                 if (discoveryService != null && target.port() == P2PServer.DEFAULT_PORT) {
                     discoveryService.sendDirectPing(target.host());
                 }
 
-                // Bước 2: Mở kết nối TCP tới host:port để lấy hostname và trạng thái khóa PIN
                 if (discoveryService != null) {
                     connectedPeer = discoveryService.connectAndVerifyPeerTcp(
                             target.host(),
@@ -418,11 +515,11 @@ public class MainController implements PeerDiscoveryListener {
                             target.port(),
                             "Peer-" + target.host(),
                             System.currentTimeMillis(),
-                            false
+                            false,
+                            -1L
                     );
                 }
 
-                // Bước 3: Gửi lệnh LIST_FILES tới đúng host:port của Peer
                 List<SharedFile> files = P2PServer.requestFileListFromPeer(connectedPeer);
 
                 updateProgress(1.0, 1.0);
@@ -448,7 +545,8 @@ public class MainController implements PeerDiscoveryListener {
                         target.port(),
                         ownerName,
                         System.currentTimeMillis(),
-                        false
+                        false,
+                        1L
                 );
                 peerList.add(peerToSelect);
             }
@@ -486,23 +584,270 @@ public class MainController implements PeerDiscoveryListener {
     }
 
     // ------------------------------------------------------------------------------------------
-    // TÁC VỤ 2: TỰ ĐỘNG ĐỒNG BỘ THƯ MỤC CHIA SẺ (JAVA NIO WATCHSERVICE)
+    // GÓI 2: BẢN ĐỒ 32 MẢNH TẢI THỜI GIAN THỰC (BITTORRENT CHUNK MATRIX UI)
     // ------------------------------------------------------------------------------------------
 
     /**
-     * Khởi chạy {@link java.nio.file.WatchService} trên luồng ngầm (Daemon Thread) thông qua
-     * {@link SharedFolderManager#startRealTimeWatcher}.
-     *
-     * <p><b>Giải thích cơ chế cho buổi bảo vệ đồ án:</b>
-     * <ul>
-     *   <li>Khi người dùng thêm tệp mới, xóa tệp hoặc chỉnh sửa tệp trong thư mục {@code Shared}
-     *       ngoài Windows Explorer, Kernel Windows gửi sự kiện {@code ENTRY_CREATE}, {@code ENTRY_DELETE},
-     *       {@code ENTRY_MODIFY} cho {@code WatchService}.</li>
-     *   <li>Luồng {@code WatchService} tự động tính lại mã băm SHA-256 trên background thread,
-     *       sau đó gọi callback này để cập nhật {@code sharedFileTable} trên luồng giao diện bằng
-     *       {@link Platform#runLater(Runnable)} mà không cần bấm nút "Làm mới".</li>
-     * </ul>
+     * Khởi tạo thanh 32 ô vuông đại diện cho 32 phân đoạn của tệp tải về (BitTorrent Piece Matrix).
      */
+    private void initializeChunkMatrixBar() {
+        if (chunkMatrixContainer == null) {
+            return;
+        }
+        chunkMatrixContainer.getChildren().clear();
+        for (int i = 0; i < DownloadManager.MATRIX_CHUNK_COUNT; i++) {
+            Region cell = new Region();
+            cell.setPrefHeight(14);
+            cell.setMinHeight(14);
+            cell.setPrefWidth(18);
+            HBox.setHgrow(cell, Priority.ALWAYS);
+            applyChunkCellStyle(cell, DownloadManager.CHUNK_STATE_WAITING);
+            chunkMatrixCells[i] = cell;
+            chunkMatrixContainer.getChildren().add(cell);
+        }
+    }
+
+    private void updateChunkMatrixCell(int chunkIndex, int state) {
+        if (chunkIndex < 0 || chunkIndex >= chunkMatrixCells.length) {
+            return;
+        }
+        runOnFxThread(() -> {
+            Region cell = chunkMatrixCells[chunkIndex];
+            if (cell != null) {
+                applyChunkCellStyle(cell, state);
+            }
+        });
+    }
+
+    private static void applyChunkCellStyle(Region cell, int state) {
+        String colorHex = switch (state) {
+            case DownloadManager.CHUNK_STATE_ACTIVE_PRIMARY -> "#3b82f6";   // Xanh dương: Đang tải từ Peer 1
+            case DownloadManager.CHUNK_STATE_ACTIVE_SWARM -> "#f59e0b";     // Cam: Đang tải song song từ Peer 2+
+            case DownloadManager.CHUNK_STATE_COMPLETED -> "#10b981";        // Xanh lá: Đã ghi xong vào .part
+            case DownloadManager.CHUNK_STATE_PAUSED_OR_RETRY -> "#ef4444";  // Đỏ: Tạm dừng hoặc chuyển nguồn Failover
+            default -> "#cbd5e1";                                           // Xám: Chưa tải
+        };
+        cell.setStyle("-fx-background-color: " + colorHex + "; -fx-background-radius: 3;");
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // GÓI 3: CHIA SẺ & GỬI CẢ THƯ MỤC (FOLDER ZIP STREAMING) + KÉO THẢ TỆP/THƯ MỤC
+    // ------------------------------------------------------------------------------------------
+
+    /**
+     * Cho phép người dùng chọn một Thư mục bất kỳ trên máy để tự động nén thành tệp {@code .zip}
+     * vào thư mục {@code Shared} và chia sẻ ngay cho toàn mạng.
+     */
+    @FXML
+    private void handleShareDirectoryAsZip() {
+        DirectoryChooser chooser = new DirectoryChooser();
+        chooser.setTitle("Chọn Thư mục để đóng gói ZIP và chia sẻ ngay");
+        Window owner = (shareFolderZipButton != null && shareFolderZipButton.getScene() != null)
+                ? shareFolderZipButton.getScene().getWindow()
+                : null;
+        File selectedDir = chooser.showDialog(owner);
+        if (selectedDir == null) {
+            return;
+        }
+        handleFilesDroppedIntoSharedTable(List.of(selectedDir));
+    }
+
+    /**
+     * Cho phép người dùng chọn một Thư mục bất kỳ trên máy, tự động đóng gói thành {@code .zip}
+     * và đẩy (Push) trực tiếp sang Peer đang chọn ở cột bên trái.
+     */
+    @FXML
+    private void handlePushDirectory() {
+        Peer selectedPeer = peerListView.getSelectionModel().getSelectedItem();
+        if (selectedPeer == null) {
+            Alert alert = new Alert(Alert.AlertType.WARNING);
+            alert.setTitle("Chưa chọn máy nhận (Peer)");
+            alert.setHeaderText("Vui lòng chọn một Peer đang online ở danh sách bên trái!");
+            alert.setContentText("Bạn cũng có thể kéo thả trực tiếp cả Thư mục vào tên Peer ở cột bên trái.");
+            alert.showAndWait();
+            return;
+        }
+
+        DirectoryChooser chooser = new DirectoryChooser();
+        chooser.setTitle("Chọn Thư mục để đóng gói ZIP và Push tới " + selectedPeer.hostName());
+        Window owner = (pushFolderButton != null && pushFolderButton.getScene() != null)
+                ? pushFolderButton.getScene().getWindow()
+                : null;
+        File selectedDir = chooser.showDialog(owner);
+        if (selectedDir == null) {
+            return;
+        }
+
+        packageAndPushDirectoryToPeer(selectedDir, selectedPeer);
+    }
+
+    private void packageAndPushDirectoryToPeer(File directory, Peer targetPeer) {
+        appendNetworkLog("Đang đóng gói ZIP thư mục \"" + directory.getName()
+                + "\" (bộ đệm 64KB) để Push tới " + targetPeer.endpoint() + "...");
+
+        Task<File> zipTask = new Task<>() {
+            @Override
+            protected File call() throws Exception {
+                updateProgress(-1, 1);
+                updateMessage("Trạng thái: Đang nén thư mục \"" + directory.getName() + ".zip\"...");
+                return sharedFolderManager.packageDirectoryToSharedZip(directory);
+            }
+        };
+
+        zipTask.setOnSucceeded(e -> {
+            File zipFile = zipTask.getValue();
+            if (zipFile != null && zipFile.exists()) {
+                appendNetworkLog("Đã đóng gói xong \"" + zipFile.getName()
+                        + "\" (" + SharedFile.formatSize(zipFile.length()) + ") -> Bắt đầu Push tới " + targetPeer.endpoint());
+                pushFileToPeer(zipFile, targetPeer);
+            }
+        });
+
+        zipTask.setOnFailed(e -> {
+            Throwable ex = zipTask.getException();
+            String err = (ex != null) ? ex.getMessage() : "Lỗi nén ZIP";
+            appendNetworkLog("Lỗi khi đóng gói thư mục: " + err);
+            setStatus("Lỗi nén thư mục: " + err);
+        });
+
+        bindUiToTask(zipTask);
+        Thread t = new Thread(zipTask, "p2p-folder-zip-pusher");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // GÓI 4: BỘ GIỚI HẠN BĂNG THÔNG CHỦ ĐỘNG (TOKEN BUCKET QoS)
+    // ------------------------------------------------------------------------------------------
+
+    private void initializeBandwidthLimiterComboBox() {
+        if (bandwidthLimitComboBox == null) {
+            return;
+        }
+        bandwidthLimitComboBox.setItems(FXCollections.observableArrayList(
+                "Không giới hạn",
+                "20 MB/s",
+                "10 MB/s",
+                "5 MB/s",
+                "2 MB/s",
+                "512 KB/s"
+        ));
+        bandwidthLimitComboBox.getSelectionModel().selectFirst();
+    }
+
+    @FXML
+    private void handleBandwidthLimitChanged() {
+        if (bandwidthLimitComboBox == null) {
+            return;
+        }
+        String selected = bandwidthLimitComboBox.getSelectionModel().getSelectedItem();
+        if (selected == null) {
+            return;
+        }
+        long bytesPerSec = switch (selected) {
+            case "20 MB/s" -> 20L * 1024 * 1024;
+            case "10 MB/s" -> 10L * 1024 * 1024;
+            case "5 MB/s" -> 5L * 1024 * 1024;
+            case "2 MB/s" -> 2L * 1024 * 1024;
+            case "512 KB/s" -> 512L * 1024;
+            default -> 0L;
+        };
+        BandwidthLimiter.getInstance().setMaxBytesPerSecond(bytesPerSec);
+        String msg = (bytesPerSec <= 0L)
+                ? "[QoS Bandwidth] Đã đặt tốc độ truyền tải: Không giới hạn (Tối đa băng thông LAN)."
+                : ("[QoS Bandwidth] Đã giới hạn băng thông ở mức tối đa: " + selected + " (Token Bucket).");
+        appendNetworkLog(msg);
+        setStatus(msg);
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // GÓI 5: KÊNH CHAT P2P TỨC THỜI MÃ HÓA ĐẦU-CUỐI AES-256-GCM
+    // ------------------------------------------------------------------------------------------
+
+    @FXML
+    private void handleSendChatMessage() {
+        String text = (chatInputField == null || chatInputField.getText() == null)
+                ? ""
+                : chatInputField.getText().trim();
+        if (text.isEmpty()) {
+            return;
+        }
+
+        Peer selectedPeer = peerListView.getSelectionModel().getSelectedItem();
+        if (selectedPeer == null) {
+            if (!peerList.isEmpty()) {
+                selectedPeer = peerList.get(0);
+            } else {
+                Alert alert = new Alert(Alert.AlertType.WARNING);
+                alert.setTitle("Chưa chọn Peer để gửi tin nhắn");
+                alert.setHeaderText("Vui lòng chọn một Peer ở danh sách bên trái hoặc kết nối tới một Peer trước!");
+                alert.showAndWait();
+                return;
+            }
+        }
+
+        chatInputField.clear();
+        sendEncryptedChatAsync(List.of(selectedPeer), text);
+    }
+
+    @FXML
+    private void handleBroadcastChatMessage() {
+        String text = (chatInputField == null || chatInputField.getText() == null)
+                ? ""
+                : chatInputField.getText().trim();
+        if (text.isEmpty()) {
+            return;
+        }
+        if (peerList.isEmpty()) {
+            setStatus("Chưa có Peer nào đang online để gửi tin nhắn Broadcast.");
+            return;
+        }
+        chatInputField.clear();
+        sendEncryptedChatAsync(new ArrayList<>(peerList), text);
+    }
+
+    private void sendEncryptedChatAsync(List<Peer> recipients, String plainMessage) {
+        String myName = resolveLocalComputerName();
+        String pin = getPeerAuthPinInput();
+        appendChatLog("Bạn -> " + (recipients.size() == 1 ? recipients.get(0).hostName() : ("Tất cả (" + recipients.size() + " Peers)")),
+                plainMessage);
+
+        Thread t = new Thread(() -> {
+            for (Peer peer : recipients) {
+                try {
+                    P2PServer.sendChatMessageToPeer(peer, myName, plainMessage, pin);
+                } catch (Exception e) {
+                    appendNetworkLog("Không gửi được tin nhắn Chat tới " + peer.endpoint() + ": " + e.getMessage());
+                }
+            }
+        }, "p2p-encrypted-chat-sender");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private void appendChatLog(String sender, String message) {
+        String time = LocalTime.now().format(TIME_FORMATTER);
+        String formatted = "[" + time + "] " + sender + ": " + message + "\n";
+        runOnFxThread(() -> {
+            if (chatHistoryArea != null) {
+                chatHistoryArea.appendText(formatted);
+            }
+        });
+    }
+
+    private static String resolveLocalComputerName() {
+        try {
+            return InetAddress.getLocalHost().getHostName();
+        } catch (UnknownHostException e) {
+            String env = System.getenv("COMPUTERNAME");
+            return (env != null && !env.isBlank()) ? env : "My-PC";
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // TỰ ĐỘNG ĐỒNG BỘ THƯ MỤC CHIA SẺ (JAVA NIO WATCHSERVICE) & DRAG-AND-DROP
+    // ------------------------------------------------------------------------------------------
+
     private void startSharedFolderRealTimeWatcher() {
         sharedFolderManager.startRealTimeWatcher((updatedLocalFiles, watchEventDescription) ->
                 runOnFxThread(() -> {
@@ -519,18 +864,6 @@ public class MainController implements PeerDiscoveryListener {
                 + sharedFolderManager.getSharedFolderPath());
     }
 
-    // ------------------------------------------------------------------------------------------
-    // TÁC VỤ 3: KÉO THẢ TỆP (DRAG & DROP) & BIỂU ĐỒ TỐC ĐỘ THỜI GIAN THỰC (AREACHART)
-    // ------------------------------------------------------------------------------------------
-
-    /**
-     * Gắn sự kiện Kéo thả tệp ({@code onDragOver} và {@code onDragDropped}) vào bảng {@code sharedFileTable}.
-     * Khi người dùng kéo một hoặc nhiều tệp từ ngoài màn hình Desktop / Windows Explorer thả vào bảng:
-     * <ul>
-     *   <li>Sao chép tệp vào thư mục {@code Shared} trên luồng nền (không làm đơ giao diện).</li>
-     *   <li>Băm SHA-256 và hiển thị ngay lên bảng chia sẻ (cùng với sự hỗ trợ của {@code WatchService}).</li>
-     * </ul>
-     */
     private void setupSharedTableDragAndDrop() {
         sharedFileTable.setOnDragOver(event -> {
             Dragboard db = event.getDragboard();
@@ -554,20 +887,20 @@ public class MainController implements PeerDiscoveryListener {
     }
 
     private void handleFilesDroppedIntoSharedTable(List<File> droppedFiles) {
-        appendNetworkLog("Kéo thả (Drag & Drop): Đang sao chép " + droppedFiles.size()
-                + " tệp vào thư mục chia sẻ (" + sharedFolderManager.getSharedFolderPath() + ")...");
+        appendNetworkLog("Kéo thả (Drag & Drop): Đang xử lý " + droppedFiles.size()
+                + " mục (hỗ trợ cả Tệp lẻ & nén Thư mục ZIP) vào " + sharedFolderManager.getSharedFolderPath() + "...");
 
         Task<List<SharedFile>> copyTask = new Task<>() {
             @Override
             protected List<SharedFile> call() throws Exception {
                 updateProgress(-1, 1);
-                updateMessage("Trạng thái: Đang sao chép và băm SHA-256 cho "
-                        + droppedFiles.size() + " tệp vừa kéo thả...");
+                updateMessage("Trạng thái: Đang sao chép / đóng gói ZIP và băm SHA-256 cho "
+                        + droppedFiles.size() + " mục...");
                 int copiedCount = sharedFolderManager.copyDroppedFilesToSharedFolder(droppedFiles);
                 List<SharedFile> updatedLocal = sharedFolderManager.scanAndHashSync();
                 updateProgress(1.0, 1.0);
                 updateMessage("Trạng thái: Đã thêm " + copiedCount
-                        + " tệp mới vào thư mục chia sẻ qua Kéo & Thả!");
+                        + " mục vào thư mục chia sẻ!");
                 return updatedLocal;
             }
         };
@@ -579,15 +912,15 @@ public class MainController implements PeerDiscoveryListener {
                 rawFileEntries.addAll(0, localFiles);
             }
             rebuildMergedFileTable();
-            appendNetworkLog("Kéo thả hoàn tất: Thư mục chia sẻ hiện có "
+            appendNetworkLog("Đồng bộ hoàn tất: Thư mục chia sẻ hiện có "
                     + (localFiles == null ? 0 : localFiles.size()) + " tệp.");
         });
 
         copyTask.setOnFailed(e -> {
             Throwable ex = copyTask.getException();
             String err = (ex != null) ? ex.getMessage() : "Lỗi I/O";
-            appendNetworkLog("Lỗi khi sao chép tệp kéo thả: " + err);
-            setStatus("Lỗi sao chép tệp kéo thả: " + err);
+            appendNetworkLog("Lỗi khi xử lý tệp/thư mục kéo thả: " + err);
+            setStatus("Lỗi sao chép/nén tệp kéo thả: " + err);
         });
 
         bindUiToTask(copyTask);
@@ -596,11 +929,6 @@ public class MainController implements PeerDiscoveryListener {
         t.start();
     }
 
-    /**
-     * Gắn sự kiện Kéo thả tệp ({@code onDragOver} và {@code onDragDropped}) vào từng ô {@link Peer}
-     * trên {@code peerListView}. Nếu người dùng kéo tệp từ Windows Explorer và thả thẳng vào tên một Peer
-     * ở cột bên trái, ứng dụng lập tức kích hoạt lệnh {@code PUSH_FILE} gửi tệp đó tới thẳng Peer đó.
-     */
     private void setupPeerListDragAndDrop() {
         peerListView.setCellFactory(listView -> {
             ListCell<Peer> cell = new ListCell<>() {
@@ -635,10 +963,12 @@ public class MainController implements PeerDiscoveryListener {
                 Dragboard db = event.getDragboard();
                 boolean success = false;
                 if (targetPeer != null && db.hasFiles()) {
-                    List<File> files = db.getFiles();
-                    for (File file : files) {
-                        if (file.isFile()) {
-                            pushFileToPeer(file, targetPeer);
+                    for (File item : db.getFiles()) {
+                        if (item.isDirectory()) {
+                            packageAndPushDirectoryToPeer(item, targetPeer);
+                            success = true;
+                        } else if (item.isFile()) {
+                            pushFileToPeer(item, targetPeer);
                             success = true;
                         }
                     }
@@ -651,9 +981,6 @@ public class MainController implements PeerDiscoveryListener {
         });
     }
 
-    /**
-     * Thực hiện đẩy (Push) trực tiếp một tệp tới {@link Peer} được chỉ định (kèm theo mã PIN xác thực nếu có).
-     */
     private void pushFileToPeer(File file, Peer targetPeer) {
         String authPin = getPeerAuthPinInput();
         appendNetworkLog("Đang Push tệp \"" + file.getName() + "\" tới " + targetPeer.endpoint() + "...");
@@ -684,22 +1011,10 @@ public class MainController implements PeerDiscoveryListener {
         senderThread.start();
     }
 
-    /**
-     * Khởi tạo biểu đồ tốc độ truyền tải thời gian thực ({@link AreaChart}) với cửa sổ trượt 30 giây.
-     *
-     * <p><b>Giải thích nguyên lý hoạt động của {@code AreaChart} (Dùng khi thuyết trình đồ án):</b>
-     * <ol>
-     *   <li>Các luồng truyền tệp ({@code ResumableDownloadTask}, {@code SwarmDownloadTask}, {@code FileSenderTask},
-     *       {@code P2PServer}) tính toán tốc độ tức thời {@code MB/s} mỗi 200ms và ghi vào biến nguyên tử
-     *       {@link #latestSpeedSampleMBps}.</li>
-     *   <li>Một bộ đếm thời gian {@link Timeline} chạy định kỳ mỗi 1 giây trên JavaFX Application Thread
-     *       đọc giá trị tốc độ hiện tại (và tự động reset về {@code 0.0 MB/s} cho chu kỳ kế tiếp nếu không có truyền tải).</li>
-     *   <li>Điểm dữ liệu mới {@code (giây_thứ_N, tốc_độ_MBps)} được thêm vào {@code XYChart.Series}.
-     *       Khi số điểm vượt quá 30 giây ({@link #SPEED_WINDOW_SECONDS}), điểm cũ nhất ở đầu danh sách bị xóa
-     *       và trục hoành {@code speedTimeAxis} dịch chuyển {@code lowerBound = N - 30}, {@code upperBound = N}
-     *       tạo hiệu ứng biểu đồ trượt mượt mà như Task Manager của Windows.</li>
-     * </ol>
-     */
+    // ------------------------------------------------------------------------------------------
+    // BIỂU ĐỒ TỐC ĐỘ THỜI GIAN THỰC (AREACHART 30 GIÂY) & BẢNG LỊCH SỬ CSV
+    // ------------------------------------------------------------------------------------------
+
     private void initializeSpeedTelemetryChart() {
         if (speedTelemetryChart == null || speedTimeAxis == null) {
             return;
@@ -709,18 +1024,15 @@ public class MainController implements PeerDiscoveryListener {
         speedTelemetryChart.getData().clear();
         speedTelemetryChart.getData().add(speedSeries);
 
-        // Khởi tạo điểm 0 ban đầu
         speedSeries.getData().add(new XYChart.Data<>(0, 0.0));
 
         speedChartTimeline = new Timeline(new KeyFrame(Duration.seconds(1.0), event -> {
             chartElapsedSeconds++;
-            // Lấy tốc độ MB/s mới nhất trong 1 giây qua và đặt lại về 0.0 cho giây tiếp theo
             double currentSpeedMBps = latestSpeedSampleMBps.getAndSet(0.0);
             double roundedSpeed = Math.round(currentSpeedMBps * 100.0) / 100.0;
 
             speedSeries.getData().add(new XYChart.Data<>(chartElapsedSeconds, roundedSpeed));
 
-            // Giữ tối đa 31 điểm dữ liệu (cửa sổ trượt 30 giây gần nhất) để không tốn RAM
             if (speedSeries.getData().size() > SPEED_WINDOW_SECONDS + 1) {
                 speedSeries.getData().remove(0);
             }
@@ -734,10 +1046,6 @@ public class MainController implements PeerDiscoveryListener {
         speedChartTimeline.play();
     }
 
-    /**
-     * Nhận mẫu tốc độ tức thời (MB/s) từ bất kỳ luồng tải hoặc gửi tệp nào.
-     * Giữ lại giá trị cao nhất trong chu kỳ 1 giây để hiển thị chính xác đỉnh tốc độ trên biểu đồ.
-     */
     private void recordSpeedSample(double speedMBps) {
         if (speedMBps < 0) {
             return;
@@ -745,13 +1053,6 @@ public class MainController implements PeerDiscoveryListener {
         latestSpeedSampleMBps.accumulateAndGet(speedMBps, Math::max);
     }
 
-    // ------------------------------------------------------------------------------------------
-    // TÁC VỤ 4: BẢNG LỊCH SỬ TRUYỀN TẢI & XUẤT BÁO CÁO HIỆU NĂNG CSV
-    // ------------------------------------------------------------------------------------------
-
-    /**
-     * Khởi tạo các cột cho bảng {@code historyTable} ở Tab "Lịch sử & Thống kê".
-     */
     private void initializeHistoryTable() {
         if (historyTable == null) {
             return;
@@ -774,9 +1075,6 @@ public class MainController implements PeerDiscoveryListener {
         }
     }
 
-    /**
-     * Ghi nhận một bản ghi {@link TransferHistoryItem} mới vào đầu bảng lịch sử trên luồng UI.
-     */
     private void recordTransferHistory(TransferHistoryItem item) {
         if (item == null) {
             return;
@@ -784,11 +1082,6 @@ public class MainController implements PeerDiscoveryListener {
         runOnFxThread(() -> historyList.add(0, item));
     }
 
-    /**
-     * Xử lý sự kiện khi người dùng bấm nút <b>"Xuất báo cáo CSV"</b> ở Tab "Lịch sử & Thống kê".
-     * Xuất toàn bộ dữ liệu trong {@code historyList} ra tệp {@code .csv} chuẩn UTF-8 (có BOM để mở trực tiếp
-     * bằng Microsoft Excel hiển thị đúng tiếng Việt không lỗi font).
-     */
     @FXML
     private void handleExportCsv() {
         if (historyList.isEmpty()) {
@@ -817,7 +1110,6 @@ public class MainController implements PeerDiscoveryListener {
 
         try (FileOutputStream fos = new FileOutputStream(targetFile);
              BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(fos, StandardCharsets.UTF_8))) {
-            // Ghi UTF-8 BOM (0xEF, 0xBB, 0xBF) để Microsoft Excel nhận diện đúng tiếng Việt có dấu
             fos.write(new byte[]{(byte) 0xEF, (byte) 0xBB, (byte) 0xBF});
 
             writer.write(TransferHistoryItem.csvHeader());
@@ -847,7 +1139,7 @@ public class MainController implements PeerDiscoveryListener {
     }
 
     // ------------------------------------------------------------------------------------------
-    // Khởi tạo mạng & Các sự kiện giao diện cốt lõi
+    // KHỞI TẠO MẠNG & CÁC SỰ KIỆN GIAO DIỆN CỐT LÕI
     // ------------------------------------------------------------------------------------------
 
     private void refreshHeaderIpBadges() {
@@ -900,7 +1192,6 @@ public class MainController implements PeerDiscoveryListener {
                 || file.sha256Hash().toLowerCase(Locale.ROOT).contains(keyword);
     }
 
-    /** Khởi động dịch vụ UDP Discovery trên cổng 8888. */
     private void startDiscovery() {
         discoveryService = new DiscoveryService(this);
         try {
@@ -918,7 +1209,6 @@ public class MainController implements PeerDiscoveryListener {
         }
     }
 
-    /** Khởi động {@link P2PServer} đa lệnh trên cổng TCP 8889 và bind vào UI. */
     private void startP2PServer() {
         p2pServer = new P2PServer(
                 P2PServer.DEFAULT_PORT,
@@ -929,11 +1219,15 @@ public class MainController implements PeerDiscoveryListener {
         p2pServer.setDiscoveryService(discoveryService);
         p2pServer.setSpeedSampleCallback(this::recordSpeedSample);
         p2pServer.setHistoryCallback(this::recordTransferHistory);
+        p2pServer.setChatMessageCallback(this::appendChatLog);
+        p2pServer.setPushApprovalHandler(this::promptUserForPushApproval);
 
-        // Đồng bộ cấu hình mã PIN hiện tại trên giao diện xuống P2PServer
         boolean pinEnabled = pinEnableCheckBox != null && pinEnableCheckBox.isSelected();
         String currentPin = (myPinTextField != null) ? myPinTextField.getText() : "";
         p2pServer.updateSecurityPinConfig(pinEnabled, currentPin);
+
+        boolean askPush = askPushConfirmCheckBox != null && askPushConfirmCheckBox.isSelected();
+        p2pServer.setAskBeforeAcceptingPush(askPush);
 
         bindUiToTask(p2pServer);
         p2pServer.messageProperty().addListener((obs, oldMsg, newMsg) -> {
@@ -946,13 +1240,9 @@ public class MainController implements PeerDiscoveryListener {
         serverThread.setDaemon(true);
         serverThread.start();
         appendNetworkLog("TCP Multi-Command Server lắng nghe cổng " + P2PServer.DEFAULT_PORT
-                + " (PING, LIST_FILES, DOWNLOAD_FILE, DOWNLOAD_CHUNK, PUSH_FILE + Security PIN).");
+                + " (PING, LIST_FILES, DOWNLOAD_FILE, DOWNLOAD_CHUNK, PUSH_FILE, CHAT_MESSAGE + AES-256).");
     }
 
-    /**
-     * Giải phóng toàn bộ tài nguyên mạng, đóng {@link java.nio.file.WatchService} và dừng
-     * {@link Timeline} biểu đồ khi người dùng đóng ứng dụng ({@code MainApplication.stop()}).
-     */
     public void shutdown() {
         if (speedChartTimeline != null) {
             speedChartTimeline.stop();
@@ -965,10 +1255,6 @@ public class MainController implements PeerDiscoveryListener {
             p2pServer.stopServer();
         }
     }
-
-    // ------------------------------------------------------------------------------------------
-    // PeerDiscoveryListener
-    // ------------------------------------------------------------------------------------------
 
     @Override
     public void onPeerDiscovered(Peer peer) {
@@ -1004,16 +1290,12 @@ public class MainController implements PeerDiscoveryListener {
         });
     }
 
-    // ------------------------------------------------------------------------------------------
-    // Các sự kiện nút bấm trên giao diện
-    // ------------------------------------------------------------------------------------------
-
     @FXML
     private void handleConfigureFirewall() {
         if (firewallConfigButton != null) {
             firewallConfigButton.setDisable(true);
         }
-        appendNetworkLog("Đang yêu cầu quyền Administrator (UAC) để mở cổng UDP 8888 & TCP 8889 (profile=any cho cả Radmin VPN & LAN)...");
+        appendNetworkLog("Đang yêu cầu quyền Administrator (UAC) để mở cổng UDP 8888 & TCP 8889 (profile=any)...");
         setStatus("Vui lòng bấm 'Yes' trên hộp thoại UAC của Windows để mở cổng mạng...");
 
         Task<Boolean> fwTask = new Task<>() {
@@ -1035,14 +1317,14 @@ public class MainController implements PeerDiscoveryListener {
                 if (firewallConfigButton != null) {
                     firewallConfigButton.setText("Firewall: Đã mở Port (8888/8889)");
                 }
-                String msg = "Đã thêm Rule Inbound & Outbound (profile=any: Domain, Private, Public/Radmin VPN) vào Windows Firewall!";
+                String msg = "Đã thêm Rule Inbound & Outbound (profile=any) vào Windows Firewall!";
                 setStatus(msg);
                 appendNetworkLog(msg);
 
                 Alert alert = new Alert(Alert.AlertType.INFORMATION);
                 alert.setTitle("Cấu hình Windows Firewall thành công");
                 alert.setHeaderText("Đã mở cổng UDP 8888 & TCP 8889 cho cả mạng LAN và Radmin VPN!");
-                alert.setContentText("Rule đã được áp dụng với profile=any (Private, Public, Domain). Hai máy có thể kết nối trực tiếp mà không cần tắt Firewall.");
+                alert.setContentText("Rule đã được áp dụng với profile=any (Private, Public, Domain).");
                 alert.showAndWait();
             } else {
                 String msg = "Chưa thể thêm Rule Firewall (bạn đã hủy hộp thoại UAC hoặc không có quyền Admin).";
@@ -1078,7 +1360,7 @@ public class MainController implements PeerDiscoveryListener {
             @Override
             protected List<Peer> call() {
                 updateProgress(-1, 1);
-                updateMessage("Trạng thái: Đang quét sâu toàn bộ lớp mạng LAN / Radmin (50 luồng TCP, timeout 150ms)...");
+                updateMessage("Trạng thái: Đang quét sâu toàn bộ lớp mạng LAN / Radmin (50 luồng TCP, đo RTT ms)...");
                 List<Peer> found = discoveryService.scanSubnetActiveTcp(
                         P2PServer.DEFAULT_PORT,
                         MainController.this::appendNetworkLog
@@ -1248,7 +1530,7 @@ public class MainController implements PeerDiscoveryListener {
             Alert alert = new Alert(Alert.AlertType.WARNING);
             alert.setTitle("Chưa chọn máy nhận (Peer)");
             alert.setHeaderText("Vui lòng chọn một Peer đang online ở danh sách bên trái!");
-            alert.setContentText("Bạn cũng có thể kéo thả tệp trực tiếp từ Windows Explorer vào tên Peer ở cột bên trái.");
+            alert.setContentText("Bạn cũng có thể kéo thả tệp hoặc cả thư mục trực tiếp vào tên Peer ở cột bên trái.");
             alert.showAndWait();
             return;
         }
@@ -1285,13 +1567,9 @@ public class MainController implements PeerDiscoveryListener {
         alert.setTitle("Xác thực mã PIN thất bại (AUTH_FAILED)");
         alert.setHeaderText("Peer " + endpoint + " từ chối yêu cầu do sai hoặc thiếu mã PIN bảo vệ!");
         alert.setContentText(detailMessage
-                + "\n\nHướng dẫn: Hãy hỏi mã PIN 4 chữ số của đối tác và nhập vào ô 'PIN đối tác' ở cột bên trái.");
+                + "\n\nHướng dẫn: Hãy hỏi mã PIN 4 chữ số (hoặc Mã Mời #PIN) của đối tác và nhập vào ô 'PIN đối tác' ở cột bên trái.");
         alert.show();
     }
-
-    // ------------------------------------------------------------------------------------------
-    // Gộp tệp trùng SHA-256 (Swarm Grouping) & Nhật ký sự kiện mạng
-    // ------------------------------------------------------------------------------------------
 
     private void scanLocalSharedFolderAsync() {
         Task<List<SharedFile>> scanTask = sharedFolderManager.createScanTask();

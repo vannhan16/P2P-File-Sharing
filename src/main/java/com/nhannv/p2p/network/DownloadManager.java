@@ -14,15 +14,32 @@ import java.util.function.DoubleConsumer;
 import java.util.function.Supplier;
 
 /**
- * Trình điều phối tải tệp trung tâm (Download Manager) nâng cấp cho Milestone 5:
+ * Trình điều phối tải tệp trung tâm (Download Manager) nâng cấp cho Milestone 6:
  * Hỗ trợ kết nối {@code host:port} (Ngrok/Playit), truyền mã PIN bảo mật 4 chữ số,
+ * trực quan hóa <b>Bản đồ 32 mảnh tải (BitTorrent Chunk Matrix)</b>,
  * đo tốc độ cho biểu đồ {@code AreaChart} và ghi nhận lịch sử {@link TransferHistoryItem}.
  */
 public class DownloadManager {
 
+    /** Số ô hiển thị trên Bản đồ mảnh tải (BitTorrent Chunk Matrix UI). */
+    public static final int MATRIX_CHUNK_COUNT = 32;
+
+    public static final int CHUNK_STATE_WAITING = 0;
+    public static final int CHUNK_STATE_ACTIVE_PRIMARY = 1;
+    public static final int CHUNK_STATE_ACTIVE_SWARM = 2;
+    public static final int CHUNK_STATE_COMPLETED = 3;
+    public static final int CHUNK_STATE_PAUSED_OR_RETRY = 4;
+
+    /** Callback cập nhật trạng thái của ô thứ {@code chunkIndex} (0..31) trên UI. */
+    @FunctionalInterface
+    public interface ChunkMatrixCallback {
+        void onChunkUpdate(int chunkIndex, int state);
+    }
+
     private final Consumer<String> eventLogger;
     private DoubleConsumer speedSampleCallback;
     private Consumer<TransferHistoryItem> historyCallback;
+    private ChunkMatrixCallback chunkMatrixCallback;
     private Supplier<String> authPinSupplier = () -> "";
 
     private SharedFile lastRequestedFile;
@@ -44,6 +61,10 @@ public class DownloadManager {
         this.historyCallback = historyCallback;
     }
 
+    public void setChunkMatrixCallback(ChunkMatrixCallback chunkMatrixCallback) {
+        this.chunkMatrixCallback = chunkMatrixCallback;
+    }
+
     public void setAuthPinSupplier(Supplier<String> authPinSupplier) {
         if (authPinSupplier != null) {
             this.authPinSupplier = authPinSupplier;
@@ -55,6 +76,7 @@ public class DownloadManager {
 
         if (lastRequestedFile == null || !lastRequestedFile.sha256Hash().equals(sharedFile.sha256Hash())) {
             savedSwarmPartProgress = null;
+            resetAllChunks(CHUNK_STATE_WAITING);
         }
 
         this.lastRequestedFile = sharedFile;
@@ -108,6 +130,7 @@ public class DownloadManager {
             }
         }
         savedSwarmPartProgress = null;
+        resetAllChunks(CHUNK_STATE_WAITING);
     }
 
     public synchronized boolean isDownloading() {
@@ -124,6 +147,14 @@ public class DownloadManager {
         return Files.exists(partPath);
     }
 
+    private void resetAllChunks(int state) {
+        if (chunkMatrixCallback != null) {
+            for (int i = 0; i < MATRIX_CHUNK_COUNT; i++) {
+                chunkMatrixCallback.onChunkUpdate(i, state);
+            }
+        }
+    }
+
     private Task<Boolean> launchTaskInternal() {
         String currentPin = authPinSupplier.get();
         if (lastTargetEndpoints.size() > 1) {
@@ -135,7 +166,8 @@ public class DownloadManager {
                     savedSwarmPartProgress,
                     eventLogger,
                     speedSampleCallback,
-                    historyCallback
+                    historyCallback,
+                    chunkMatrixCallback
             );
             activeSwarmTask.valueProperty().addListener((obs, oldVal, completedOk) -> {
                 if (Boolean.TRUE.equals(completedOk)) {
@@ -157,7 +189,8 @@ public class DownloadManager {
                     currentPin,
                     eventLogger,
                     speedSampleCallback,
-                    historyCallback
+                    historyCallback,
+                    chunkMatrixCallback
             );
             Thread t = new Thread(activeResumableTask, "p2p-resumable-downloader");
             t.setDaemon(true);

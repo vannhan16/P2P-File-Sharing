@@ -3,6 +3,7 @@ package com.nhannv.p2p.network;
 import com.nhannv.p2p.model.Peer;
 import com.nhannv.p2p.model.SharedFile;
 import com.nhannv.p2p.model.TransferHistoryItem;
+import com.nhannv.p2p.util.BandwidthLimiter;
 import com.nhannv.p2p.util.HashUtil;
 import javafx.concurrent.Task;
 
@@ -29,7 +30,8 @@ import java.util.logging.Logger;
 
 /**
  * Tác vụ tải tệp hỗ trợ <b>Pause / Resume</b> dựa trên tệp tạm {@code .part},
- * hỗ trợ kết nối <b>Host:Port (Ngrok/Playit)</b> và xác thực <b>Security PIN (4 số)</b>.
+ * hỗ trợ kết nối <b>Host:Port (Ngrok/Playit)</b>, xác thực <b>Security PIN (4 số)</b>,
+ * điều tiết băng thông <b>Token Bucket QoS</b> và trực quan hóa <b>BitTorrent 32-Chunk Matrix</b>.
  */
 public class ResumableDownloadTask extends Task<Boolean> {
 
@@ -48,12 +50,13 @@ public class ResumableDownloadTask extends Task<Boolean> {
     private final Consumer<String> eventLogger;
     private final DoubleConsumer speedSampleCallback;
     private final Consumer<TransferHistoryItem> historyCallback;
+    private final DownloadManager.ChunkMatrixCallback chunkMatrixCallback;
 
     private volatile boolean isPaused = false;
     private volatile boolean isCanceledByUser = false;
 
     public ResumableDownloadTask(SharedFile targetFile, String targetEndpoint, Consumer<String> eventLogger) {
-        this(targetFile, targetEndpoint, "", eventLogger, null, null);
+        this(targetFile, targetEndpoint, "", eventLogger, null, null, null);
     }
 
     public ResumableDownloadTask(
@@ -64,6 +67,18 @@ public class ResumableDownloadTask extends Task<Boolean> {
             DoubleConsumer speedSampleCallback,
             Consumer<TransferHistoryItem> historyCallback
     ) {
+        this(targetFile, targetEndpoint, authPin, eventLogger, speedSampleCallback, historyCallback, null);
+    }
+
+    public ResumableDownloadTask(
+            SharedFile targetFile,
+            String targetEndpoint,
+            String authPin,
+            Consumer<String> eventLogger,
+            DoubleConsumer speedSampleCallback,
+            Consumer<TransferHistoryItem> historyCallback,
+            DownloadManager.ChunkMatrixCallback chunkMatrixCallback
+    ) {
         this.targetFile = Objects.requireNonNull(targetFile, "targetFile");
         Peer.HostPort hp = Peer.parseHostPort(targetEndpoint, P2PServer.DEFAULT_PORT);
         this.targetHost = hp.host();
@@ -73,6 +88,7 @@ public class ResumableDownloadTask extends Task<Boolean> {
         this.eventLogger = eventLogger;
         this.speedSampleCallback = speedSampleCallback;
         this.historyCallback = historyCallback;
+        this.chunkMatrixCallback = chunkMatrixCallback;
     }
 
     public void pauseDownload() {
@@ -111,6 +127,9 @@ public class ResumableDownloadTask extends Task<Boolean> {
                 Files.deleteIfExists(partFile.toPath());
                 existingBytes = 0L;
             }
+
+            // Đánh dấu các ô mảnh đã tải xong từ phiên trước lên Bản đồ 32 mảnh (BitTorrent Matrix)
+            updateChunkMatrixProgress(existingBytes, Math.max(expectedTotalSize, 1L), false);
 
             if (existingBytes > 0 && existingBytes < expectedTotalSize) {
                 double resumedPercent = (existingBytes * 100.0) / expectedTotalSize;
@@ -179,6 +198,7 @@ public class ResumableDownloadTask extends Task<Boolean> {
                             while (remaining > 0) {
                                 if (isPaused) {
                                     reportSpeed(0.0);
+                                    updateChunkMatrixProgress(currentTotalDownloaded, Math.max(remoteTotalSize, 1L), true);
                                     double pct = remoteTotalSize > 0
                                             ? (currentTotalDownloaded * 100.0) / remoteTotalSize : 0.0;
                                     String pauseMsg = String.format(Locale.US,
@@ -209,10 +229,13 @@ public class ResumableDownloadTask extends Task<Boolean> {
                                 }
 
                                 raf.write(buffer, 0, read);
+                                BandwidthLimiter.getInstance().throttle(read);
 
                                 currentTotalDownloaded += read;
                                 sessionBytesRead += read;
                                 remaining -= read;
+
+                                updateChunkMatrixProgress(currentTotalDownloaded, Math.max(remoteTotalSize, 1L), false);
 
                                 double speedMBps = calculateSpeedMBps(sessionBytesRead, sessionStartNano);
                                 reportSpeed(speedMBps);
@@ -227,6 +250,7 @@ public class ResumableDownloadTask extends Task<Boolean> {
 
                         if (currentTotalDownloaded < remoteTotalSize) {
                             reportSpeed(0.0);
+                            updateChunkMatrixProgress(currentTotalDownloaded, Math.max(remoteTotalSize, 1L), true);
                             double pct = (currentTotalDownloaded * 100.0) / remoteTotalSize;
                             String msg = String.format(Locale.US,
                                     "Gián đoạn kết nối tại %.1f%% (offset=%d). Bấm 'Tiếp tục (Resume)' để tải tiếp!",
@@ -240,6 +264,7 @@ public class ResumableDownloadTask extends Task<Boolean> {
             }
 
             reportSpeed(0.0);
+            markAllChunksCompleted();
             updateMessage("Đang kiểm tra mã băm SHA-256 cho tệp " + partFile.getName() + "...");
             String actualSha256 = HashUtil.calculateSHA256(partFile);
             long durationMs = Math.max(1L, (System.nanoTime() - startNanoOverall) / 1_000_000L);
@@ -288,6 +313,33 @@ public class ResumableDownloadTask extends Task<Boolean> {
             updateMessage("Trạng thái: " + errMsg);
             logEvent(errMsg);
             return false;
+        }
+    }
+
+    private void updateChunkMatrixProgress(long downloadedBytes, long totalBytes, boolean paused) {
+        if (chunkMatrixCallback == null || totalBytes <= 0) {
+            return;
+        }
+        int totalCells = DownloadManager.MATRIX_CHUNK_COUNT;
+        int completedCells = (int) Math.min(totalCells, (downloadedBytes * totalCells) / totalBytes);
+        for (int i = 0; i < totalCells; i++) {
+            if (i < completedCells) {
+                chunkMatrixCallback.onChunkUpdate(i, DownloadManager.CHUNK_STATE_COMPLETED);
+            } else if (i == completedCells && downloadedBytes > 0 && downloadedBytes < totalBytes) {
+                chunkMatrixCallback.onChunkUpdate(i,
+                        paused ? DownloadManager.CHUNK_STATE_PAUSED_OR_RETRY
+                                : DownloadManager.CHUNK_STATE_ACTIVE_PRIMARY);
+            } else {
+                chunkMatrixCallback.onChunkUpdate(i, DownloadManager.CHUNK_STATE_WAITING);
+            }
+        }
+    }
+
+    private void markAllChunksCompleted() {
+        if (chunkMatrixCallback != null) {
+            for (int i = 0; i < DownloadManager.MATRIX_CHUNK_COUNT; i++) {
+                chunkMatrixCallback.onChunkUpdate(i, DownloadManager.CHUNK_STATE_COMPLETED);
+            }
         }
     }
 
