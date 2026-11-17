@@ -11,6 +11,7 @@ import com.nhannv.p2p.network.P2PServer;
 import com.nhannv.p2p.network.PeerDiscoveryListener;
 import com.nhannv.p2p.util.BandwidthLimiter;
 import com.nhannv.p2p.util.FirewallUtil;
+import com.nhannv.p2p.util.HashUtil;
 import com.nhannv.p2p.util.SharedFolderManager;
 import javafx.animation.KeyFrame;
 import javafx.animation.Timeline;
@@ -22,6 +23,7 @@ import javafx.collections.ObservableList;
 import javafx.collections.transformation.FilteredList;
 import javafx.concurrent.Task;
 import javafx.fxml.FXML;
+import javafx.geometry.Pos;
 import javafx.scene.chart.AreaChart;
 import javafx.scene.chart.NumberAxis;
 import javafx.scene.chart.XYChart;
@@ -34,10 +36,12 @@ import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
 import javafx.scene.control.ProgressBar;
+import javafx.scene.control.TableCell;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
+import javafx.scene.control.Tooltip;
 import javafx.scene.input.Clipboard;
 import javafx.scene.input.ClipboardContent;
 import javafx.scene.input.Dragboard;
@@ -45,10 +49,15 @@ import javafx.scene.input.TransferMode;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
+import javafx.scene.layout.VBox;
+import javafx.scene.paint.Color;
+import javafx.scene.shape.Circle;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.FileChooser;
 import javafx.stage.Window;
 import javafx.util.Duration;
+import org.kordamp.ikonli.feather.Feather;
+import org.kordamp.ikonli.javafx.FontIcon;
 
 import java.io.BufferedWriter;
 import java.io.File;
@@ -74,25 +83,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Controller trung tâm của {@code MainView.fxml} (Hoàn thiện toàn diện Milestone 1 -> Milestone 6 Enterprise).
- *
- * <h2>5 Gói Tính Năng Nâng Cao ở Milestone 6 (Dành cho Thuyết trình &amp; Vấn đáp Đồ án)</h2>
- * <ol>
- *   <li><b>Gói 1 — Bảo mật AES-256-GCM &amp; Phê duyệt Nhận tệp Push:</b>
- *       Mã hóa đầu-cuối tin nhắn/dữ liệu bằng {@code AES/GCM/NoPadding} (khóa 256-bit dẫn xuất qua PBKDF2)
- *       và hỗ trợ hộp thoại hỏi ý kiến người nhận (<i>Accept / Reject</i>) trước khi nhận tệp Push.</li>
- *   <li><b>Gói 2 — Bản đồ 32 mảnh tải (BitTorrent Chunk Matrix UI) &amp; Swarm Failover:</b>
- *       Trực quan hóa 32 phân đoạn của tệp đang tải theo thời gian thực và tự động chuyển hướng sang Peer dự phòng
- *       nếu một Peer bị ngắt kết nối giữa chừng.</li>
- *   <li><b>Gói 3 — Chia sẻ &amp; Gửi toàn bộ Thư mục (On-the-fly Folder ZIP Packaging):</b>
- *       Cho phép chọn hoặc kéo thả nguyên một thư mục dự án để tự động nén thành {@code .zip} (bộ đệm 64KB)
- *       và chia sẻ/Push ngay lập tức.</li>
- *   <li><b>Gói 4 — Giới hạn băng thông chủ động (Token Bucket QoS) &amp; Đo độ trễ Ping RTT (ms):</b>
- *       Điều tiết tốc độ truyền theo ngưỡng chọn sẵn ({@code Không giới hạn}, {@code 20 MB/s}, {@code 10 MB/s},
- *       {@code 5 MB/s}, {@code 2 MB/s}, {@code 512 KB/s}) và đo độ trễ RTT {@code ms} tới từng Peer.</li>
- *   <li><b>Gói 5 — Kênh Chat P2P Bảo mật &amp; 1-Click Invite Token ({@code host:port#PIN}):</b>
- *       Sao chép nhanh chuỗi kết nối kèm PIN vào Clipboard và trò chuyện P2P trực tiếp không cần phần mềm thứ ba.</li>
- * </ol>
+ * Controller trung tâm của {@code MainView.fxml} — Áp dụng trọn vẹn hệ thống thiết kế
+ * <b>JavaFX Crafted Desktop UI</b> (Linear / LocalSend / Fluent Design System) cùng toàn bộ
+ * các tính năng từ Milestone 1 đến Milestone 6 Enterprise.
  */
 public class MainController implements PeerDiscoveryListener {
 
@@ -100,11 +93,21 @@ public class MainController implements PeerDiscoveryListener {
     private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss");
     private static final int SPEED_WINDOW_SECONDS = 30;
 
+    // --- 1. Top Header Bar & Network Identity Pills ---
     @FXML
-    private Label networkIpBadgeLabel;
+    private Label brandTitleLabel;
 
     @FXML
-    private Label sharedFolderLabel;
+    private Label serverStatusPill;
+
+    @FXML
+    private Label lanIpPillLabel;
+
+    @FXML
+    private Label radminIpPillLabel;
+
+    @FXML
+    private Label pinStatusPillLabel;
 
     @FXML
     private Button firewallConfigButton;
@@ -112,7 +115,7 @@ public class MainController implements PeerDiscoveryListener {
     @FXML
     private Button themeToggleButton;
 
-    // --- Cột trái: Ô nhập host:port#PIN, Security PIN, Push Approval & Danh sách Peer ---
+    // --- 2. Left Sidebar: Device Radar & Security PIN / Invite Card ---
     @FXML
     private TextField directIpTextField;
 
@@ -143,7 +146,13 @@ public class MainController implements PeerDiscoveryListener {
     @FXML
     private Button deepScanButton;
 
-    // --- Tab 1: Tìm kiếm, Chia sẻ thư mục ZIP, Bảng 5 cột, BitTorrent 32-Chunk Matrix & AreaChart ---
+    @FXML
+    private Label sharedFolderLabel;
+
+    // --- 3. Center Workspace: Tab 1 (Files & Chunk Matrix), Tab 2 (CSV History), Tab 3 (Encrypted Chat) ---
+    @FXML
+    private Label searchIconHolder;
+
     @FXML
     private TextField searchTextField;
 
@@ -178,18 +187,8 @@ public class MainController implements PeerDiscoveryListener {
     private HBox chunkMatrixContainer;
 
     @FXML
-    private AreaChart<Number, Number> speedTelemetryChart;
-
-    @FXML
-    private NumberAxis speedTimeAxis;
-
-    @FXML
-    private NumberAxis speedValueAxis;
-
-    @FXML
     private TextArea networkLogArea;
 
-    // --- Tab 2: Bảng Lịch sử truyền tải & Xuất báo cáo CSV ---
     @FXML
     private Label historyCountLabel;
 
@@ -223,16 +222,48 @@ public class MainController implements PeerDiscoveryListener {
     @FXML
     private TableColumn<TransferHistoryItem, String> historyHashStatusColumn;
 
-    // --- Tab 3: Kênh Chat P2P Bảo mật AES-256-GCM ---
     @FXML
     private TextArea chatHistoryArea;
 
     @FXML
     private TextField chatInputField;
 
-    // --- Thanh điều khiển dưới cùng (Bottom Bar + QoS Bandwidth Limiter) ---
+    @FXML
+    private Button sendChatButton;
+
+    @FXML
+    private Button broadcastChatButton;
+
+    // --- 4. Bottom Transfer Dock: Status, Speed Metric, 6px Progress, AreaChart & Controls ---
+    @FXML
+    private Label statusLabel;
+
+    @FXML
+    private Label liveSpeedBadgeLabel;
+
+    @FXML
+    private ProgressBar transferProgressBar;
+
+    @FXML
+    private ComboBox<String> bandwidthLimitComboBox;
+
+    @FXML
+    private AreaChart<Number, Number> speedTelemetryChart;
+
+    @FXML
+    private NumberAxis speedTimeAxis;
+
+    @FXML
+    private NumberAxis speedValueAxis;
+
     @FXML
     private Button downloadSelectedButton;
+
+    @FXML
+    private Button chooseFileButton;
+
+    @FXML
+    private Button pushFolderButton;
 
     @FXML
     private Button pauseButton;
@@ -243,37 +274,12 @@ public class MainController implements PeerDiscoveryListener {
     @FXML
     private Button cancelButton;
 
-    @FXML
-    private Button chooseFileButton;
-
-    @FXML
-    private Button pushFolderButton;
-
-    @FXML
-    private ComboBox<String> bandwidthLimitComboBox;
-
-    @FXML
-    private Label statusLabel;
-
-    @FXML
-    private ProgressBar transferProgressBar;
-
-    /** Danh sách Peer đang online trong LAN / Radmin VPN / Internet Tunnel. */
     private final ObservableList<Peer> peerList = FXCollections.observableArrayList();
-
-    /** Danh sách tệp thô (chưa gộp) từ máy cục bộ và các Peer. */
     private final List<SharedFile> rawFileEntries = new ArrayList<>();
-
-    /** Danh sách tệp đã gộp theo mã SHA-256 để hiển thị lên TableView. */
     private final ObservableList<SharedFile> masterFileList = FXCollections.observableArrayList();
-
-    /** Danh sách bọc quanh masterFileList để lọc theo ô tìm kiếm tức thời. */
     private FilteredList<SharedFile> filteredFileList;
-
-    /** Danh sách lưu lịch sử truyền tải tệp (Gửi / Nhận / Swarm) phục vụ Tab Thống kê & Xuất CSV. */
     private final ObservableList<TransferHistoryItem> historyList = FXCollections.observableArrayList();
 
-    /** Mảng 32 ô vuông hiển thị trực quan trạng thái từng phân đoạn tải (BitTorrent Chunk Matrix). */
     private final Region[] chunkMatrixCells = new Region[DownloadManager.MATRIX_CHUNK_COUNT];
 
     private final SharedFolderManager sharedFolderManager = new SharedFolderManager();
@@ -281,20 +287,25 @@ public class MainController implements PeerDiscoveryListener {
     private DiscoveryService discoveryService;
     private P2PServer p2pServer;
 
-    /** Lưu mẫu tốc độ truyền tải tức thời (MB/s) mới nhất từ luồng tải/gửi để vẽ lên AreaChart. */
     private final AtomicReference<Double> latestSpeedSampleMBps = new AtomicReference<>(0.0);
-
     private XYChart.Series<Number, Number> speedSeries;
     private Timeline speedChartTimeline;
     private int chartElapsedSeconds = 0;
 
     @FXML
     private void initialize() {
-        // --- 1. Cột trái: Khởi tạo mã PIN ngẫu nhiên 4 số & Danh sách Peer ---
+        // --- 1. Gắn Vector Icons (Ikonli Feather) sắc nét cho toàn bộ nút bấm & nhãn ---
+        configureVectorIcons();
+
+        // --- 2. Khởi tạo mã PIN bảo mật & Radar Thiết bị (Custom ListCell<Peer>) ---
         initializeSecurityPinControls();
 
         peerListView.setItems(peerList);
-        peerListView.setPlaceholder(new Label("Đang tìm Peer (LAN / Radmin / Tunnel)..."));
+        peerListView.setPlaceholder(createCraftedPlaceholder(
+                Feather.RADIO,
+                "Đang dò tìm thiết bị trên LAN / Radmin...",
+                "Hoặc nhập trực tiếp IP:Port / Mã mời ở ô phía trên"
+        ));
         peerCountLabel.textProperty().bind(Bindings.size(peerList).asString("(%d)"));
 
         peerListView.getSelectionModel().selectedItemProperty().addListener((obs, oldPeer, selectedPeer) -> {
@@ -303,16 +314,15 @@ public class MainController implements PeerDiscoveryListener {
             }
         });
 
-        setupPeerListDragAndDrop();
+        setupPeerListCustomCardCells();
 
-        // --- 2. Tab 1: Bảng tệp chia sẻ 5 cột + Kéo thả Tệp/Thư mục ---
-        fileNameColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().fileName()));
-        fileSizeColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().formattedSize()));
-        fileSourcesColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().peerCountDisplay()));
-        fileOwnerColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().ownerDisplay()));
-        fileHashColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().sha256Hash()));
-        sharedFileTable.setPlaceholder(new Label(
-                "Chưa có tệp nào — Kéo thả Tệp hoặc cả Thư mục từ Windows Explorer vào bảng này để chia sẻ ngay!"));
+        // --- 3. Khởi tạo Bảng Tệp Chia Sẻ với Custom TableCell (SHA-256 Badge, Monospace Size) ---
+        configureSharedFileTableColumns();
+        sharedFileTable.setPlaceholder(createCraftedPlaceholder(
+                Feather.INBOX,
+                "Chưa có tệp nào trong không gian chia sẻ",
+                "Kéo thả Tệp hoặc cả Thư mục từ Windows Explorer vào bảng này để chia sẻ ngay"
+        ));
 
         filteredFileList = new FilteredList<>(masterFileList, file -> true);
         sharedFileTable.setItems(filteredFileList);
@@ -324,15 +334,14 @@ public class MainController implements PeerDiscoveryListener {
 
         setupSharedTableDragAndDrop();
 
-        // --- 3. Khởi tạo Bản đồ 32 mảnh tải (BitTorrent Chunk Matrix) & Biểu đồ tốc độ AreaChart ---
+        // --- 4. Khởi tạo Bản đồ 32 phân đoạn (BitTorrent Chunk Matrix) & Đồ thị tốc độ Dock ---
         initializeChunkMatrixBar();
         initializeSpeedTelemetryChart();
 
-        // --- 4. Khởi tạo Bảng Lịch sử truyền tải & Bộ giới hạn băng thông QoS ---
+        // --- 5. Khởi tạo Bảng Lịch sử truyền tải & Bộ giới hạn băng thông QoS ---
         initializeHistoryTable();
         initializeBandwidthLimiterComboBox();
 
-        // Cấu hình callback cho DownloadManager
         downloadManager.setAuthPinSupplier(this::getPeerAuthPinInput);
         downloadManager.setSpeedSampleCallback(this::recordSpeedSample);
         downloadManager.setHistoryCallback(this::recordTransferHistory);
@@ -340,28 +349,376 @@ public class MainController implements PeerDiscoveryListener {
 
         updateSharedFolderLabel();
         refreshHeaderIpBadges();
-        appendNetworkLog("Khởi tạo P2P File Sharing (M6 Enterprise: AES-256-GCM, BitTorrent 32-Chunk Matrix, Folder ZIP, QoS & Chat)...");
+        appendNetworkLog("Khởi tạo P2P File Sharing — Crafted Desktop UI & Milestone 6 Enterprise...");
         appendChatLog("Hệ thống", "Kênh Chat P2P bảo mật đầu-cuối (AES-256-GCM) đã sẵn sàng.");
         logDetectedPhysicalSubnets();
         checkFirewallStatusAsync();
 
-        // --- 5. Khởi động UDP Discovery & P2P Multi-Command TCP Server ---
+        // --- 6. Khởi động dịch vụ mạng & NIO WatchService ---
         startDiscovery();
         startP2PServer();
-
-        // --- 6. Quét thư mục Shared lần đầu & Bật Java NIO WatchService tự động đồng bộ ---
         scanLocalSharedFolderAsync();
         startSharedFolderRealTimeWatcher();
     }
 
     // ------------------------------------------------------------------------------------------
-    // GÓI 1 & GÓI 5: BẢO MẬT PIN, HỘP THOẠI PHÊ DUYỆT PUSH & MÃ MỜI 1-CLICK (host:port#PIN)
+    // CẤU HÌNH VECTOR ICONS (IKONLI FEATHER) & CUSTOM CELLS CHUẨN CRAFTED UI
+    // ------------------------------------------------------------------------------------------
+
+    private static FontIcon icon(Feather featherIcon, int size, String hexColor) {
+        FontIcon fi = new FontIcon(featherIcon);
+        fi.setIconSize(size);
+        if (hexColor != null && !hexColor.isBlank()) {
+            fi.setIconColor(Color.web(hexColor));
+        }
+        return fi;
+    }
+
+    private void configureVectorIcons() {
+        if (brandTitleLabel != null) {
+            brandTitleLabel.setGraphic(icon(Feather.SHARE_2, 16, "#3B82F6"));
+            brandTitleLabel.setGraphicTextGap(8);
+        }
+        if (serverStatusPill != null) {
+            serverStatusPill.setGraphic(icon(Feather.ACTIVITY, 12, "#10B981"));
+            serverStatusPill.setGraphicTextGap(5);
+        }
+        if (lanIpPillLabel != null) {
+            lanIpPillLabel.setGraphic(icon(Feather.WIFI, 12, "#3B82F6"));
+            lanIpPillLabel.setGraphicTextGap(5);
+        }
+        if (radminIpPillLabel != null) {
+            radminIpPillLabel.setGraphic(icon(Feather.SHIELD, 12, "#8B949E"));
+            radminIpPillLabel.setGraphicTextGap(5);
+        }
+        if (pinStatusPillLabel != null) {
+            pinStatusPillLabel.setGraphic(icon(Feather.LOCK, 12, "#8B949E"));
+            pinStatusPillLabel.setGraphicTextGap(5);
+        }
+        if (firewallConfigButton != null) {
+            firewallConfigButton.setGraphic(icon(Feather.SHIELD, 13, "#F59E0B"));
+        }
+        if (themeToggleButton != null) {
+            updateThemeButtonGraphic(MainApplication.isDarkThemeActive());
+        }
+        if (connectDirectIpButton != null) {
+            connectDirectIpButton.setGraphic(icon(Feather.LINK, 13, "#FFFFFF"));
+        }
+        if (copyInviteTokenButton != null) {
+            copyInviteTokenButton.setGraphic(icon(Feather.COPY, 12, "#3B82F6"));
+        }
+        if (deepScanButton != null) {
+            deepScanButton.setGraphic(icon(Feather.RADIO, 12, "#3B82F6"));
+        }
+        if (searchIconHolder != null) {
+            searchIconHolder.setGraphic(icon(Feather.SEARCH, 14, "#8B949E"));
+        }
+        if (shareFolderZipButton != null) {
+            shareFolderZipButton.setGraphic(icon(Feather.ARCHIVE, 13, "#3B82F6"));
+        }
+        if (chooseSharedFolderButton != null) {
+            chooseSharedFolderButton.setGraphic(icon(Feather.FOLDER, 13, "#8B949E"));
+        }
+        if (refreshFilesButton != null) {
+            refreshFilesButton.setGraphic(icon(Feather.REFRESH_CW, 13, "#8B949E"));
+        }
+        if (exportCsvButton != null) {
+            exportCsvButton.setGraphic(icon(Feather.DOWNLOAD, 13, "#FFFFFF"));
+        }
+        if (sendChatButton != null) {
+            sendChatButton.setGraphic(icon(Feather.SEND, 13, "#FFFFFF"));
+        }
+        if (broadcastChatButton != null) {
+            broadcastChatButton.setGraphic(icon(Feather.RADIO, 13, "#3B82F6"));
+        }
+        if (downloadSelectedButton != null) {
+            downloadSelectedButton.setGraphic(icon(Feather.DOWNLOAD_CLOUD, 14, "#FFFFFF"));
+        }
+        if (chooseFileButton != null) {
+            chooseFileButton.setGraphic(icon(Feather.UPLOAD, 13, "#3B82F6"));
+        }
+        if (pushFolderButton != null) {
+            pushFolderButton.setGraphic(icon(Feather.FOLDER_PLUS, 13, "#3B82F6"));
+        }
+        if (pauseButton != null) {
+            pauseButton.setGraphic(icon(Feather.PAUSE, 13, "#F59E0B"));
+        }
+        if (resumeButton != null) {
+            resumeButton.setGraphic(icon(Feather.PLAY, 13, "#10B981"));
+        }
+        if (cancelButton != null) {
+            cancelButton.setGraphic(icon(Feather.X_CIRCLE, 13, "#EF4444"));
+        }
+    }
+
+    private void updateThemeButtonGraphic(boolean isDark) {
+        if (themeToggleButton == null) {
+            return;
+        }
+        if (isDark) {
+            themeToggleButton.setText("Light Mode");
+            themeToggleButton.setGraphic(icon(Feather.SUN, 13, "#F59E0B"));
+        } else {
+            themeToggleButton.setText("Dark Mode");
+            themeToggleButton.setGraphic(icon(Feather.MOON, 13, "#3B82F6"));
+        }
+    }
+
+    private static VBox createCraftedPlaceholder(Feather featherIcon, String title, String subtitle) {
+        VBox box = new VBox(6);
+        box.getStyleClass().add("empty-placeholder-box");
+        box.setAlignment(Pos.CENTER);
+
+        FontIcon iconNode = icon(featherIcon, 28, "#6E7681");
+        Label titleLabel = new Label(title);
+        titleLabel.getStyleClass().add("empty-placeholder-title");
+
+        Label subLabel = new Label(subtitle);
+        subLabel.getStyleClass().add("empty-placeholder-subtitle");
+
+        box.getChildren().addAll(iconNode, titleLabel, subLabel);
+        return box;
+    }
+
+    /**
+     * Custom {@link ListCell} cho danh sách Peer ở Sidebar bên trái (Tuyệt đối không dùng {@code toString()}):
+     * Mỗi Peer là một Card gồm chấm tròn xanh lá ({@code Circle} 8px), Tên máy in đậm (13px),
+     * icon khóa nếu bật PIN, badge độ trễ RTT {@code ms} và địa chỉ IP:Port font Monospace (11px) ở dòng dưới.
+     */
+    private void setupPeerListCustomCardCells() {
+        peerListView.setCellFactory(listView -> {
+            ListCell<Peer> cell = new ListCell<>() {
+                private final VBox cardRoot = new VBox(3);
+                private final HBox topRow = new HBox(6);
+                private final Circle onlineDot = new Circle(4.0);
+                private final Label hostNameLabel = new Label();
+                private final Region spacer = new Region();
+                private final Label rttBadgeLabel = new Label();
+                private final Label ipEndpointLabel = new Label();
+
+                {
+                    cardRoot.getStyleClass().add("peer-card-item");
+                    topRow.setAlignment(Pos.CENTER_LEFT);
+                    onlineDot.getStyleClass().add("peer-online-dot");
+                    hostNameLabel.getStyleClass().add("peer-card-hostname");
+                    HBox.setHgrow(spacer, Priority.ALWAYS);
+                    rttBadgeLabel.getStyleClass().add("peer-rtt-badge");
+                    ipEndpointLabel.getStyleClass().add("peer-card-ip");
+
+                    topRow.getChildren().addAll(onlineDot, hostNameLabel, spacer, rttBadgeLabel);
+                    cardRoot.getChildren().addAll(topRow, ipEndpointLabel);
+                }
+
+                @Override
+                protected void updateItem(Peer peer, boolean empty) {
+                    super.updateItem(peer, empty);
+                    if (empty || peer == null) {
+                        setText(null);
+                        setGraphic(null);
+                    } else {
+                        hostNameLabel.setText(peer.hostName());
+                        if (peer.pinProtected()) {
+                            hostNameLabel.setGraphic(icon(Feather.LOCK, 11, "#F59E0B"));
+                            hostNameLabel.setGraphicTextGap(4);
+                        } else {
+                            hostNameLabel.setGraphic(null);
+                        }
+
+                        if (peer.latencyMs() >= 0) {
+                            rttBadgeLabel.setText(peer.latencyMs() + " ms");
+                            rttBadgeLabel.setVisible(true);
+                            rttBadgeLabel.setManaged(true);
+                        } else {
+                            rttBadgeLabel.setVisible(false);
+                            rttBadgeLabel.setManaged(false);
+                        }
+
+                        ipEndpointLabel.setText(peer.endpoint());
+                        setText(null);
+                        setGraphic(cardRoot);
+                    }
+                }
+            };
+
+            cell.setOnDragOver(event -> {
+                if (!cell.isEmpty() && cell.getItem() != null && event.getDragboard().hasFiles()) {
+                    event.acceptTransferModes(TransferMode.COPY);
+                    if (cell.getGraphic() != null && !cell.getGraphic().getStyleClass().contains("peer-card-drop-target")) {
+                        cell.getGraphic().getStyleClass().add("peer-card-drop-target");
+                    }
+                }
+                event.consume();
+            });
+
+            cell.setOnDragExited(event -> {
+                if (cell.getGraphic() != null) {
+                    cell.getGraphic().getStyleClass().remove("peer-card-drop-target");
+                }
+                event.consume();
+            });
+
+            cell.setOnDragDropped(event -> {
+                if (cell.getGraphic() != null) {
+                    cell.getGraphic().getStyleClass().remove("peer-card-drop-target");
+                }
+                Peer targetPeer = cell.getItem();
+                Dragboard db = event.getDragboard();
+                boolean success = false;
+                if (targetPeer != null && db.hasFiles()) {
+                    for (File item : db.getFiles()) {
+                        if (item.isDirectory()) {
+                            packageAndPushDirectoryToPeer(item, targetPeer);
+                            success = true;
+                        } else if (item.isFile()) {
+                            pushFileToPeer(item, targetPeer);
+                            success = true;
+                        }
+                    }
+                }
+                event.setDropCompleted(success);
+                event.consume();
+            });
+
+            return cell;
+        });
+    }
+
+    /**
+     * Cấu hình các cột của {@code sharedFileTable} với Custom {@link TableCell}:
+     * <ul>
+     *   <li>Cột Tên tệp: Kèm Vector Icon phân biệt tệp nén {@code .zip} và tệp thường.</li>
+     *   <li>Cột Dung lượng: Căn phải ({@code CENTER_RIGHT}) và dùng font Monospace.</li>
+     *   <li>Cột Nguồn tải: Hiển thị dạng Semantic Pill ({@code Swarm N Peers} hoặc {@code 1 Peer}).</li>
+     *   <li>Cột Thiết bị sở hữu: Hiển thị font Monospace cho IP/Endpoint.</li>
+     *   <li>Cột SHA-256: Hiển thị dạng thẻ code rút gọn {@code a8f5...92c1} kèm Tooltip full 64 ký tự và click để copy.</li>
+     * </ul>
+     */
+    private void configureSharedFileTableColumns() {
+        fileNameColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().fileName()));
+        fileNameColumn.setCellFactory(col -> new TableCell<>() {
+            @Override
+            protected void updateItem(String name, boolean empty) {
+                super.updateItem(name, empty);
+                if (empty || name == null) {
+                    setText(null);
+                    setGraphic(null);
+                } else {
+                    boolean isArchive = name.toLowerCase(Locale.ROOT).endsWith(".zip");
+                    setGraphic(icon(isArchive ? Feather.ARCHIVE : Feather.FILE_TEXT, 14,
+                            isArchive ? "#F59E0B" : "#3B82F6"));
+                    setGraphicTextGap(8);
+                    setText(name);
+                }
+            }
+        });
+
+        fileSizeColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().formattedSize()));
+        fileSizeColumn.setCellFactory(col -> new TableCell<>() {
+            {
+                getStyleClass().add("cell-right-mono");
+            }
+
+            @Override
+            protected void updateItem(String sizeText, boolean empty) {
+                super.updateItem(sizeText, empty);
+                setText(empty ? null : sizeText);
+            }
+        });
+
+        fileSourcesColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().peerCountDisplay()));
+        fileSourcesColumn.setCellFactory(col -> new TableCell<>() {
+            private final Label badge = new Label();
+
+            @Override
+            protected void updateItem(String val, boolean empty) {
+                super.updateItem(val, empty);
+                if (empty || val == null || getTableRow() == null || getTableRow().getItem() == null) {
+                    setGraphic(null);
+                    setText(null);
+                } else {
+                    SharedFile sf = getTableRow().getItem();
+                    badge.setText(val);
+                    badge.getStyleClass().setAll("network-pill",
+                            sf.peerCount() > 1 ? "pill-sync" : "pill-neutral");
+                    setGraphic(badge);
+                    setText(null);
+                }
+            }
+        });
+
+        fileOwnerColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().ownerDisplay()));
+        fileOwnerColumn.setCellFactory(col -> new TableCell<>() {
+            {
+                getStyleClass().add("mono-text");
+            }
+
+            @Override
+            protected void updateItem(String owner, boolean empty) {
+                super.updateItem(owner, empty);
+                setText(empty ? null : owner);
+            }
+        });
+
+        fileHashColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().sha256Hash()));
+        fileHashColumn.setCellFactory(col -> new TableCell<>() {
+            private final Label hashBadge = new Label();
+            private final Tooltip fullHashTooltip = new Tooltip();
+
+            {
+                hashBadge.getStyleClass().add("sha-code-badge");
+                hashBadge.setOnMouseClicked(e -> {
+                    if (getItem() != null && !getItem().isBlank()) {
+                        ClipboardContent cc = new ClipboardContent();
+                        cc.putString(getItem());
+                        Clipboard.getSystemClipboard().setContent(cc);
+                        setStatus("Đã copy mã SHA-256 đầy đủ (64 ký tự) vào Clipboard: " + HashUtil.shortHash(getItem()));
+                    }
+                });
+            }
+
+            @Override
+            protected void updateItem(String fullHash, boolean empty) {
+                super.updateItem(fullHash, empty);
+                if (empty || fullHash == null || fullHash.isBlank()) {
+                    setGraphic(null);
+                    setText(null);
+                } else {
+                    hashBadge.setText(HashUtil.shortHash(fullHash));
+                    hashBadge.setGraphic(icon(Feather.COPY, 11, "#3B82F6"));
+                    hashBadge.setGraphicTextGap(5);
+                    fullHashTooltip.setText("SHA-256 đầy đủ (Click để copy):\n" + fullHash);
+                    Tooltip.install(hashBadge, fullHashTooltip);
+                    setGraphic(hashBadge);
+                    setText(null);
+                }
+            }
+        });
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // BẢO MẬT PIN, HỘP THOẠI PHÊ DUYỆT PUSH & MÃ MỜI 1-CLICK (host:port#PIN)
     // ------------------------------------------------------------------------------------------
 
     private void initializeSecurityPinControls() {
         String randomPin = String.format("%04d", ThreadLocalRandom.current().nextInt(10_000));
         if (myPinTextField != null) {
             myPinTextField.setText(randomPin);
+        }
+        updatePinHeaderPill(false, randomPin);
+    }
+
+    private void updatePinHeaderPill(boolean enabled, String pin) {
+        if (pinStatusPillLabel == null) {
+            return;
+        }
+        if (enabled && pin != null && !pin.isBlank()) {
+            pinStatusPillLabel.setText("PIN: " + pin);
+            pinStatusPillLabel.getStyleClass().setAll("network-pill", "pill-warning");
+            pinStatusPillLabel.setGraphic(icon(Feather.LOCK, 12, "#F59E0B"));
+        } else {
+            pinStatusPillLabel.setText("PIN: OFF");
+            pinStatusPillLabel.getStyleClass().setAll("network-pill", "pill-neutral");
+            pinStatusPillLabel.setGraphic(icon(Feather.UNLOCK, 12, "#8B949E"));
         }
     }
 
@@ -375,6 +732,7 @@ public class MainController implements PeerDiscoveryListener {
         if (p2pServer != null) {
             p2pServer.updateSecurityPinConfig(enabled, pin);
         }
+        updatePinHeaderPill(enabled, pin);
 
         if (enabled) {
             appendNetworkLog("[BẢO MẬT PIN] Đã BẬT bảo vệ bằng mã PIN (" + pin
@@ -399,15 +757,12 @@ public class MainController implements PeerDiscoveryListener {
         setStatus(msg);
     }
 
-    /**
-     * Hiển thị hộp thoại hỏi ý kiến người dùng trên luồng JavaFX trước khi cho phép Peer khác Push tệp vào máy.
-     */
     private Boolean promptUserForPushApproval(String senderAndFile, Long fileSizeBytes) {
         CompletableFuture<Boolean> decisionFuture = new CompletableFuture<>();
         runOnFxThread(() -> {
             Alert alert = new Alert(Alert.AlertType.CONFIRMATION);
             alert.setTitle("Yêu cầu gửi tệp trực tiếp (Incoming Push Request)");
-            alert.setHeaderText("Một Peer muốn gửi tệp vào máy của bạn!");
+            alert.setHeaderText("Một thiết bị Peer muốn gửi tệp vào máy của bạn!");
             alert.setContentText("Thông tin tệp: " + senderAndFile
                     + "\nDung lượng: " + SharedFile.formatSize(fileSizeBytes == null ? 0L : fileSizeBytes)
                     + "\n\nBạn có đồng ý nhận tệp này vào thư mục Downloads/ không?");
@@ -426,10 +781,6 @@ public class MainController implements PeerDiscoveryListener {
         }
     }
 
-    /**
-     * Sao chép nhanh <b>Mã Mời Kết Nối 1-Click</b> định dạng {@code IP:8889#PIN} vào Clipboard hệ thống.
-     * Bạn cùng nhóm chỉ cần dán chuỗi này vào ô kết nối là tự động điền cả IP, Port lẫn mã PIN!
-     */
     @FXML
     private void handleCopyInviteToken() {
         String radminIp = DiscoveryService.detectRadminVpnIp();
@@ -446,8 +797,7 @@ public class MainController implements PeerDiscoveryListener {
         content.putString(token);
         Clipboard.getSystemClipboard().setContent(content);
 
-        String msg = "Đã copy Mã Mời 1-Click vào Clipboard: " + token
-                + " (Hãy gửi mã này cho bạn cùng nhóm dán vào ô Kết nối!)";
+        String msg = "Đã copy Mã Mời 1-Click vào Clipboard: " + token;
         appendNetworkLog(msg);
         setStatus(msg);
     }
@@ -459,10 +809,6 @@ public class MainController implements PeerDiscoveryListener {
         return peerPinTextField.getText().trim();
     }
 
-    /**
-     * Kết nối trực tiếp qua {@code host:port} hoặc <b>Mã mời 1-Click {@code host:port#PIN}</b>.
-     * Nếu chuỗi nhập có chứa {@code #PIN}, tự động tách mã PIN điền vào ô {@code peerPinTextField}!
-     */
     @FXML
     private void handleConnectDirectIp() {
         String rawInput = (directIpTextField == null) ? "" : directIpTextField.getText();
@@ -584,12 +930,9 @@ public class MainController implements PeerDiscoveryListener {
     }
 
     // ------------------------------------------------------------------------------------------
-    // GÓI 2: BẢN ĐỒ 32 MẢNH TẢI THỜI GIAN THỰC (BITTORRENT CHUNK MATRIX UI)
+    // BẢN ĐỒ 32 MẢNH TẢI THỜI GIAN THỰC (BITTORRENT CHUNK MATRIX UI - PURE CSS CLASSES)
     // ------------------------------------------------------------------------------------------
 
-    /**
-     * Khởi tạo thanh 32 ô vuông đại diện cho 32 phân đoạn của tệp tải về (BitTorrent Piece Matrix).
-     */
     private void initializeChunkMatrixBar() {
         if (chunkMatrixContainer == null) {
             return;
@@ -597,11 +940,11 @@ public class MainController implements PeerDiscoveryListener {
         chunkMatrixContainer.getChildren().clear();
         for (int i = 0; i < DownloadManager.MATRIX_CHUNK_COUNT; i++) {
             Region cell = new Region();
-            cell.setPrefHeight(14);
-            cell.setMinHeight(14);
+            cell.setPrefHeight(12);
+            cell.setMinHeight(12);
             cell.setPrefWidth(18);
             HBox.setHgrow(cell, Priority.ALWAYS);
-            applyChunkCellStyle(cell, DownloadManager.CHUNK_STATE_WAITING);
+            applyChunkCellStyleClass(cell, DownloadManager.CHUNK_STATE_WAITING);
             chunkMatrixCells[i] = cell;
             chunkMatrixContainer.getChildren().add(cell);
         }
@@ -614,30 +957,26 @@ public class MainController implements PeerDiscoveryListener {
         runOnFxThread(() -> {
             Region cell = chunkMatrixCells[chunkIndex];
             if (cell != null) {
-                applyChunkCellStyle(cell, state);
+                applyChunkCellStyleClass(cell, state);
             }
         });
     }
 
-    private static void applyChunkCellStyle(Region cell, int state) {
-        String colorHex = switch (state) {
-            case DownloadManager.CHUNK_STATE_ACTIVE_PRIMARY -> "#3b82f6";   // Xanh dương: Đang tải từ Peer 1
-            case DownloadManager.CHUNK_STATE_ACTIVE_SWARM -> "#f59e0b";     // Cam: Đang tải song song từ Peer 2+
-            case DownloadManager.CHUNK_STATE_COMPLETED -> "#10b981";        // Xanh lá: Đã ghi xong vào .part
-            case DownloadManager.CHUNK_STATE_PAUSED_OR_RETRY -> "#ef4444";  // Đỏ: Tạm dừng hoặc chuyển nguồn Failover
-            default -> "#cbd5e1";                                           // Xám: Chưa tải
+    private static void applyChunkCellStyleClass(Region cell, int state) {
+        String stateClass = switch (state) {
+            case DownloadManager.CHUNK_STATE_ACTIVE_PRIMARY -> "chunk-active-primary";
+            case DownloadManager.CHUNK_STATE_ACTIVE_SWARM -> "chunk-active-swarm";
+            case DownloadManager.CHUNK_STATE_COMPLETED -> "chunk-completed";
+            case DownloadManager.CHUNK_STATE_PAUSED_OR_RETRY -> "chunk-paused-error";
+            default -> "chunk-waiting";
         };
-        cell.setStyle("-fx-background-color: " + colorHex + "; -fx-background-radius: 3;");
+        cell.getStyleClass().setAll("chunk-cell", stateClass);
     }
 
     // ------------------------------------------------------------------------------------------
-    // GÓI 3: CHIA SẺ & GỬI CẢ THƯ MỤC (FOLDER ZIP STREAMING) + KÉO THẢ TỆP/THƯ MỤC
+    // CHIA SẺ & GỬI CẢ THƯ MỤC (FOLDER ZIP STREAMING) + KÉO THẢ
     // ------------------------------------------------------------------------------------------
 
-    /**
-     * Cho phép người dùng chọn một Thư mục bất kỳ trên máy để tự động nén thành tệp {@code .zip}
-     * vào thư mục {@code Shared} và chia sẻ ngay cho toàn mạng.
-     */
     @FXML
     private void handleShareDirectoryAsZip() {
         DirectoryChooser chooser = new DirectoryChooser();
@@ -652,10 +991,6 @@ public class MainController implements PeerDiscoveryListener {
         handleFilesDroppedIntoSharedTable(List.of(selectedDir));
     }
 
-    /**
-     * Cho phép người dùng chọn một Thư mục bất kỳ trên máy, tự động đóng gói thành {@code .zip}
-     * và đẩy (Push) trực tiếp sang Peer đang chọn ở cột bên trái.
-     */
     @FXML
     private void handlePushDirectory() {
         Peer selectedPeer = peerListView.getSelectionModel().getSelectedItem();
@@ -663,7 +998,7 @@ public class MainController implements PeerDiscoveryListener {
             Alert alert = new Alert(Alert.AlertType.WARNING);
             alert.setTitle("Chưa chọn máy nhận (Peer)");
             alert.setHeaderText("Vui lòng chọn một Peer đang online ở danh sách bên trái!");
-            alert.setContentText("Bạn cũng có thể kéo thả trực tiếp cả Thư mục vào tên Peer ở cột bên trái.");
+            alert.setContentText("Bạn cũng có thể kéo thả trực tiếp cả Thư mục vào thẻ Peer ở cột bên trái.");
             alert.showAndWait();
             return;
         }
@@ -717,7 +1052,7 @@ public class MainController implements PeerDiscoveryListener {
     }
 
     // ------------------------------------------------------------------------------------------
-    // GÓI 4: BỘ GIỚI HẠN BĂNG THÔNG CHỦ ĐỘNG (TOKEN BUCKET QoS)
+    // BỘ GIỚI HẠN BĂNG THÔNG CHỦ ĐỘNG (TOKEN BUCKET QoS)
     // ------------------------------------------------------------------------------------------
 
     private void initializeBandwidthLimiterComboBox() {
@@ -754,14 +1089,14 @@ public class MainController implements PeerDiscoveryListener {
         };
         BandwidthLimiter.getInstance().setMaxBytesPerSecond(bytesPerSec);
         String msg = (bytesPerSec <= 0L)
-                ? "[QoS Bandwidth] Đã đặt tốc độ truyền tải: Không giới hạn (Tối đa băng thông LAN)."
-                : ("[QoS Bandwidth] Đã giới hạn băng thông ở mức tối đa: " + selected + " (Token Bucket).");
+                ? "[QoS Bandwidth] Tốc độ truyền tải: Không giới hạn."
+                : ("[QoS Bandwidth] Giới hạn băng thông tối đa: " + selected + " (Token Bucket).");
         appendNetworkLog(msg);
         setStatus(msg);
     }
 
     // ------------------------------------------------------------------------------------------
-    // GÓI 5: KÊNH CHAT P2P TỨC THỜI MÃ HÓA ĐẦU-CUỐI AES-256-GCM
+    // KÊNH CHAT P2P TỨC THỜI MÃ HÓA ĐẦU-CUỐI AES-256-GCM
     // ------------------------------------------------------------------------------------------
 
     @FXML
@@ -780,7 +1115,7 @@ public class MainController implements PeerDiscoveryListener {
             } else {
                 Alert alert = new Alert(Alert.AlertType.WARNING);
                 alert.setTitle("Chưa chọn Peer để gửi tin nhắn");
-                alert.setHeaderText("Vui lòng chọn một Peer ở danh sách bên trái hoặc kết nối tới một Peer trước!");
+                alert.setHeaderText("Vui lòng chọn một thiết bị ở Radar bên trái hoặc kết nối tới một Peer trước!");
                 alert.showAndWait();
                 return;
             }
@@ -888,7 +1223,7 @@ public class MainController implements PeerDiscoveryListener {
 
     private void handleFilesDroppedIntoSharedTable(List<File> droppedFiles) {
         appendNetworkLog("Kéo thả (Drag & Drop): Đang xử lý " + droppedFiles.size()
-                + " mục (hỗ trợ cả Tệp lẻ & nén Thư mục ZIP) vào " + sharedFolderManager.getSharedFolderPath() + "...");
+                + " mục vào " + sharedFolderManager.getSharedFolderPath() + "...");
 
         Task<List<SharedFile>> copyTask = new Task<>() {
             @Override
@@ -929,58 +1264,6 @@ public class MainController implements PeerDiscoveryListener {
         t.start();
     }
 
-    private void setupPeerListDragAndDrop() {
-        peerListView.setCellFactory(listView -> {
-            ListCell<Peer> cell = new ListCell<>() {
-                @Override
-                protected void updateItem(Peer item, boolean empty) {
-                    super.updateItem(item, empty);
-                    if (empty || item == null) {
-                        setText(null);
-                        setStyle("");
-                    } else {
-                        setText(item.toString());
-                    }
-                }
-            };
-
-            cell.setOnDragOver(event -> {
-                if (!cell.isEmpty() && cell.getItem() != null && event.getDragboard().hasFiles()) {
-                    event.acceptTransferModes(TransferMode.COPY);
-                    cell.setStyle("-fx-background-color: rgba(52, 211, 153, 0.30); -fx-font-weight: bold;");
-                }
-                event.consume();
-            });
-
-            cell.setOnDragExited(event -> {
-                cell.setStyle("");
-                event.consume();
-            });
-
-            cell.setOnDragDropped(event -> {
-                cell.setStyle("");
-                Peer targetPeer = cell.getItem();
-                Dragboard db = event.getDragboard();
-                boolean success = false;
-                if (targetPeer != null && db.hasFiles()) {
-                    for (File item : db.getFiles()) {
-                        if (item.isDirectory()) {
-                            packageAndPushDirectoryToPeer(item, targetPeer);
-                            success = true;
-                        } else if (item.isFile()) {
-                            pushFileToPeer(item, targetPeer);
-                            success = true;
-                        }
-                    }
-                }
-                event.setDropCompleted(success);
-                event.consume();
-            });
-
-            return cell;
-        });
-    }
-
     private void pushFileToPeer(File file, Peer targetPeer) {
         String authPin = getPeerAuthPinInput();
         appendNetworkLog("Đang Push tệp \"" + file.getName() + "\" tới " + targetPeer.endpoint() + "...");
@@ -1012,7 +1295,7 @@ public class MainController implements PeerDiscoveryListener {
     }
 
     // ------------------------------------------------------------------------------------------
-    // BIỂU ĐỒ TỐC ĐỘ THỜI GIAN THỰC (AREACHART 30 GIÂY) & BẢNG LỊCH SỬ CSV
+    // BIỂU ĐỒ TỐC ĐỘ THỜI GIAN THỰC (BOTTOM DOCK AREACHART) & BẢNG LỊCH SỬ CSV
     // ------------------------------------------------------------------------------------------
 
     private void initializeSpeedTelemetryChart() {
@@ -1030,6 +1313,10 @@ public class MainController implements PeerDiscoveryListener {
             chartElapsedSeconds++;
             double currentSpeedMBps = latestSpeedSampleMBps.getAndSet(0.0);
             double roundedSpeed = Math.round(currentSpeedMBps * 100.0) / 100.0;
+
+            if (liveSpeedBadgeLabel != null) {
+                liveSpeedBadgeLabel.setText(String.format(Locale.US, "%.2f MB/s", roundedSpeed));
+            }
 
             speedSeries.getData().add(new XYChart.Data<>(chartElapsedSeconds, roundedSpeed));
 
@@ -1059,19 +1346,91 @@ public class MainController implements PeerDiscoveryListener {
         }
         historyTimeColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().timestamp()));
         historyFileColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().fileName()));
-        historySizeColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().formattedSize()));
-        historyPeerColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().peerEndpoint()));
-        historyDirectionColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().direction()));
-        historySpeedColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().formattedSpeed()));
-        historyDurationColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().formattedDuration()));
-        historyHashStatusColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().sha256Status()));
 
-        historyTable.setPlaceholder(new Label("Chưa có phiên truyền tải nào hoàn tất trong phiên làm việc này."));
+        historySizeColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().formattedSize()));
+        historySizeColumn.setCellFactory(col -> new TableCell<>() {
+            {
+                getStyleClass().add("cell-right-mono");
+            }
+
+            @Override
+            protected void updateItem(String item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty ? null : item);
+            }
+        });
+
+        historyPeerColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().peerEndpoint()));
+        historyPeerColumn.setCellFactory(col -> new TableCell<>() {
+            {
+                getStyleClass().add("mono-text");
+            }
+
+            @Override
+            protected void updateItem(String item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty ? null : item);
+            }
+        });
+
+        historyDirectionColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().direction()));
+
+        historySpeedColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().formattedSpeed()));
+        historySpeedColumn.setCellFactory(col -> new TableCell<>() {
+            {
+                getStyleClass().add("cell-right-mono");
+            }
+
+            @Override
+            protected void updateItem(String item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty ? null : item);
+            }
+        });
+
+        historyDurationColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().formattedDuration()));
+        historyDurationColumn.setCellFactory(col -> new TableCell<>() {
+            {
+                getStyleClass().add("cell-right-mono");
+            }
+
+            @Override
+            protected void updateItem(String item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty ? null : item);
+            }
+        });
+
+        historyHashStatusColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().sha256Status()));
+        historyHashStatusColumn.setCellFactory(col -> new TableCell<>() {
+            private final Label statusPill = new Label();
+
+            @Override
+            protected void updateItem(String status, boolean empty) {
+                super.updateItem(status, empty);
+                if (empty || status == null) {
+                    setGraphic(null);
+                    setText(null);
+                } else {
+                    boolean valid = status.startsWith("Hợp lệ");
+                    statusPill.setText(status);
+                    statusPill.getStyleClass().setAll("network-pill", valid ? "pill-online" : "pill-error");
+                    setGraphic(statusPill);
+                    setText(null);
+                }
+            }
+        });
+
+        historyTable.setPlaceholder(createCraftedPlaceholder(
+                Feather.BAR_CHART_2,
+                "Chưa có phiên truyền tải nào hoàn tất",
+                "Các thông số tốc độ MB/s, thời gian hoàn thành (ms) và kiểm định SHA-256 sẽ tự động lưu tại đây"
+        ));
         historyTable.setItems(historyList);
 
         if (historyCountLabel != null) {
             historyCountLabel.textProperty().bind(
-                    Bindings.size(historyList).asString("(%d phiên truyền tải đã ghi nhận)"));
+                    Bindings.size(historyList).asString("(%d phiên hoàn tất)"));
         }
     }
 
@@ -1145,8 +1504,15 @@ public class MainController implements PeerDiscoveryListener {
     private void refreshHeaderIpBadges() {
         String lanIp = DiscoveryService.detectLocalLanIp();
         String radminIp = DiscoveryService.detectRadminVpnIp();
-        if (networkIpBadgeLabel != null) {
-            networkIpBadgeLabel.setText("IP LAN: " + lanIp + "   |   IP Radmin VPN: " + radminIp);
+
+        if (lanIpPillLabel != null) {
+            lanIpPillLabel.setText("LAN: " + lanIp);
+        }
+        if (radminIpPillLabel != null) {
+            boolean radminActive = radminIp != null && radminIp.startsWith("26.");
+            radminIpPillLabel.setText("Radmin: " + (radminActive ? radminIp : "OFF"));
+            radminIpPillLabel.getStyleClass().setAll("network-pill", radminActive ? "pill-online" : "pill-neutral");
+            radminIpPillLabel.setGraphic(icon(Feather.SHIELD, 12, radminActive ? "#10B981" : "#8B949E"));
         }
     }
 
@@ -1170,11 +1536,12 @@ public class MainController implements PeerDiscoveryListener {
             runOnFxThread(() -> {
                 if (configured) {
                     if (firewallConfigButton != null) {
-                        firewallConfigButton.setText("Firewall: Đã mở Port (8888/8889)");
+                        firewallConfigButton.setText("Firewall: Ready");
+                        firewallConfigButton.setGraphic(icon(Feather.CHECK_CIRCLE, 13, "#10B981"));
                     }
                     appendNetworkLog("Windows Firewall: Đã có sẵn Rule (profile=any) cho phép UDP 8888 & TCP 8889.");
                 } else {
-                    appendNetworkLog("Gợi ý: Hãy bấm 'Cấu hình Firewall (1-Click)' ở góc trên để mở cổng cho Radmin VPN & LAN!");
+                    appendNetworkLog("Gợi ý: Bấm 'Firewall (1-Click)' ở thanh trên cùng để mở cổng cho Radmin VPN & LAN.");
                 }
             });
         }, "p2p-firewall-checker");
@@ -1315,7 +1682,8 @@ public class MainController implements PeerDiscoveryListener {
             boolean ok = Boolean.TRUE.equals(fwTask.getValue());
             if (ok) {
                 if (firewallConfigButton != null) {
-                    firewallConfigButton.setText("Firewall: Đã mở Port (8888/8889)");
+                    firewallConfigButton.setText("Firewall: Ready");
+                    firewallConfigButton.setGraphic(icon(Feather.CHECK_CIRCLE, 13, "#10B981"));
                 }
                 String msg = "Đã thêm Rule Inbound & Outbound (profile=any) vào Windows Firewall!";
                 setStatus(msg);
@@ -1353,7 +1721,7 @@ public class MainController implements PeerDiscoveryListener {
         }
         if (deepScanButton != null) {
             deepScanButton.setDisable(true);
-            deepScanButton.setText("Đang quét dải IP (.1-.254)...");
+            deepScanButton.setText("Đang quét...");
         }
 
         Task<List<Peer>> scanTask = new Task<>() {
@@ -1375,7 +1743,7 @@ public class MainController implements PeerDiscoveryListener {
         scanTask.setOnSucceeded(e -> {
             if (deepScanButton != null) {
                 deepScanButton.setDisable(false);
-                deepScanButton.setText("Quét sâu mạng LAN / Radmin");
+                deepScanButton.setText("Quét LAN");
             }
             List<Peer> foundPeers = scanTask.getValue();
             appendNetworkLog("Quét sâu TCP hoàn tất: tìm thấy "
@@ -1388,7 +1756,7 @@ public class MainController implements PeerDiscoveryListener {
         scanTask.setOnFailed(e -> {
             if (deepScanButton != null) {
                 deepScanButton.setDisable(false);
-                deepScanButton.setText("Quét sâu mạng LAN / Radmin");
+                deepScanButton.setText("Quét LAN");
             }
             setStatus("Lỗi khi quét sâu mạng LAN.");
         });
@@ -1402,10 +1770,8 @@ public class MainController implements PeerDiscoveryListener {
     @FXML
     private void handleToggleTheme() {
         boolean isDark = MainApplication.toggleTheme();
-        if (themeToggleButton != null) {
-            themeToggleButton.setText(isDark ? "Primer Light" : "Nord Dark");
-        }
-        appendNetworkLog("Đã chuyển giao diện sang theme AtlantaFX: " + (isDark ? "Nord Dark" : "Primer Light"));
+        updateThemeButtonGraphic(isDark);
+        appendNetworkLog("Đã chuyển đổi chế độ giao diện sang: " + (isDark ? "Primer Dark (Surface #0D1117)" : "Primer Light (Surface #F8FAFC)"));
     }
 
     @FXML
@@ -1486,7 +1852,7 @@ public class MainController implements PeerDiscoveryListener {
             Alert alert = new Alert(Alert.AlertType.WARNING);
             alert.setTitle("Chưa chọn tệp để tải");
             alert.setHeaderText("Vui lòng chọn một tệp trong bảng danh sách ở giữa!");
-            alert.setContentText("Hãy bấm chọn một tệp từ danh sách trước khi bấm \"Tải tệp đã chọn\".");
+            alert.setContentText("Hãy bấm chọn một tệp từ danh sách trước khi bấm \"Tải tệp\".");
             alert.showAndWait();
             return;
         }
@@ -1529,14 +1895,14 @@ public class MainController implements PeerDiscoveryListener {
         if (selectedPeer == null) {
             Alert alert = new Alert(Alert.AlertType.WARNING);
             alert.setTitle("Chưa chọn máy nhận (Peer)");
-            alert.setHeaderText("Vui lòng chọn một Peer đang online ở danh sách bên trái!");
-            alert.setContentText("Bạn cũng có thể kéo thả tệp hoặc cả thư mục trực tiếp vào tên Peer ở cột bên trái.");
+            alert.setHeaderText("Vui lòng chọn một thiết bị Peer ở Radar bên trái!");
+            alert.setContentText("Bạn cũng có thể kéo thả tệp hoặc cả thư mục trực tiếp vào thẻ Peer ở cột bên trái.");
             alert.showAndWait();
             return;
         }
 
         FileChooser fileChooser = new FileChooser();
-        fileChooser.setTitle("Chọn tệp để gửi tới " + selectedPeer);
+        fileChooser.setTitle("Chọn tệp để gửi tới " + selectedPeer.hostName());
         fileChooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("Tất cả tệp", "*.*"));
 
         Window owner = chooseFileButton.getScene().getWindow();
@@ -1666,8 +2032,8 @@ public class MainController implements PeerDiscoveryListener {
 
     private void updateSharedFolderLabel() {
         if (sharedFolderLabel != null) {
-            sharedFolderLabel.setText("Thư mục chia sẻ: " + sharedFolderManager.getSharedFolderPath()
-                    + " (Tự động đồng bộ NIO WatchService)");
+            sharedFolderLabel.setText("Shared: " + sharedFolderManager.getSharedFolderPath().getFileName()
+                    + " (NIO WatchService Active)");
         }
     }
 

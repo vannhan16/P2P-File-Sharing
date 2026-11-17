@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
-<?import javafx.geometry.Insets?>
 <?import javafx.scene.chart.AreaChart?>
 <?import javafx.scene.chart.NumberAxis?>
 <?import javafx.scene.control.Button?>
@@ -17,308 +16,343 @@
 <?import javafx.scene.control.TextField?>
 <?import javafx.scene.layout.BorderPane?>
 <?import javafx.scene.layout.HBox?>
+<?import javafx.scene.layout.Region?>
 <?import javafx.scene.layout.VBox?>
 
-<!-- Main Dashboard (Milestone 6 Enterprise Edition): Host:Port#PIN Invite, AES-256-GCM, BitTorrent 32-Chunk Matrix, Folder ZIP Streaming, QoS Limiter & P2P Chat -->
+<!-- Crafted Desktop UI (Linear / LocalSend / Fluent Design System) - Zero Inline Styles -->
 <BorderPane xmlns="http://javafx.com/javafx/17" xmlns:fx="http://javafx.com/fxml/1"
             fx:controller="com.nhannv.p2p.ui.MainController"
-            prefWidth="1280" prefHeight="800">
+            prefWidth="1320" prefHeight="820">
 
-    <!-- TOP: Application header + IP LAN / IP Radmin VPN display + 1-Click Firewall + Theme Switcher -->
+    <!-- 1. TOP HEADER BAR (52px): Brand + Server Status + Network Identity Pills + Firewall & Theme Toggle -->
     <top>
-        <VBox style="-fx-background-color: #1f2937;">
-            <HBox alignment="CENTER_LEFT" spacing="10">
-                <padding><Insets top="10" right="16" bottom="6" left="16"/></padding>
-                <Label text="P2P LAN &amp; Internet File Sharing"
-                       style="-fx-text-fill: white; -fx-font-size: 18px; -fx-font-weight: bold;"/>
-                <Label text="M6 Enterprise: AES-256-GCM • BitTorrent Chunk Matrix • Folder ZIP • QoS • P2P Chat"
-                       style="-fx-text-fill: #9ca3af; -fx-font-size: 12px;"/>
-                <Label fx:id="networkIpBadgeLabel"
-                       text="IP LAN: Đang dò... | IP Radmin VPN: Đang dò..."
-                       HBox.hgrow="ALWAYS" maxWidth="Infinity" alignment="CENTER"
-                       style="-fx-text-fill: #34d399; -fx-font-weight: bold; -fx-font-size: 13px;"/>
-                <Button fx:id="firewallConfigButton"
-                        text="Cấu hình Firewall (1-Click)"
-                        onAction="#handleConfigureFirewall"
-                        styleClass="warning"/>
-                <Button fx:id="themeToggleButton" text="Nord Dark"
-                        onAction="#handleToggleTheme"/>
-            </HBox>
-            <HBox alignment="CENTER_LEFT" spacing="12">
-                <padding><Insets top="0" right="16" bottom="8" left="16"/></padding>
-                <Label fx:id="sharedFolderLabel" text="Thư mục chia sẻ: Shared/ (Tự động đồng bộ NIO WatchService)"
-                       style="-fx-text-fill: #d1d5db; -fx-font-size: 12px;"/>
-            </HBox>
-        </VBox>
+        <HBox styleClass="top-header-bar" alignment="CENTER_LEFT" spacing="10">
+            <Label fx:id="brandTitleLabel"
+                   text="P2P LAN &amp; Tunnel File Sharing"
+                   styleClass="app-brand-title"/>
+            <Label fx:id="serverStatusPill"
+                   text="TCP :8889 ONLINE"
+                   styleClass="network-pill, pill-online"/>
+
+            <Region HBox.hgrow="ALWAYS"/>
+
+            <!-- Network Identity Pills (Monospace) -->
+            <Label fx:id="lanIpPillLabel"
+                   text="LAN: 127.0.0.1"
+                   styleClass="network-pill, pill-sync"/>
+            <Label fx:id="radminIpPillLabel"
+                   text="Radmin: OFF"
+                   styleClass="network-pill, pill-neutral"/>
+            <Label fx:id="pinStatusPillLabel"
+                   text="PIN: OFF"
+                   styleClass="network-pill, pill-neutral"/>
+
+            <Button fx:id="firewallConfigButton"
+                    text="Firewall (1-Click)"
+                    onAction="#handleConfigureFirewall"
+                    styleClass="button-outlined"/>
+            <Button fx:id="themeToggleButton"
+                    text="Light Mode"
+                    onAction="#handleToggleTheme"
+                    styleClass="button-outlined"/>
+        </HBox>
     </top>
 
-    <!-- LEFT: Direct Host:Port#PIN Connect + Security PIN & Push Approval + Online Peers (with RTT ms) -->
+    <!-- 2. LEFT SIDEBAR - DEVICE RADAR (280px, Surface 1) -->
     <left>
-        <VBox spacing="7" minWidth="315" prefWidth="315" maxWidth="315">
-            <padding><Insets top="10" right="8" bottom="10" left="12"/></padding>
+        <VBox styleClass="sidebar-radar" spacing="10" minWidth="285" prefWidth="285" maxWidth="285">
 
-            <!-- Kết nối trực tiếp qua IP / host:port hoặc Mã mời nhanh host:port#PIN -->
-            <Label text="Kết nối trực tiếp (host:port hoặc Mã mời #PIN)"
-                   style="-fx-font-weight: bold; -fx-font-size: 12.5px;"/>
+            <!-- Direct Connect InputGroup (host:port or Invite Token host:port#PIN) -->
+            <Label text="KẾT NỐI NHANH (IP:PORT / #PIN)" styleClass="section-header"/>
             <HBox alignment="CENTER_LEFT" spacing="6">
                 <TextField fx:id="directIpTextField"
-                           promptText="vd: 26.x.x.x:8889#1234 hoặc ngrok.io:14523"
+                           promptText="26.x.x.x:8889#PIN hoặc ngrok..."
                            onAction="#handleConnectDirectIp"
+                           styleClass="mono-text"
                            HBox.hgrow="ALWAYS"/>
                 <Button fx:id="connectDirectIpButton"
                         text="Kết nối"
                         onAction="#handleConnectDirectIp"
-                        styleClass="success"/>
+                        styleClass="accent"/>
             </HBox>
 
-            <!-- Khối Bảo mật PIN 4 số + Hỏi xác nhận khi nhận Push + Copy Mã Mời 1-Click -->
-            <VBox spacing="5" style="-fx-background-color: rgba(99, 102, 241, 0.10); -fx-padding: 8; -fx-background-radius: 6;">
+            <!-- Security PIN & Invite Token Card -->
+            <VBox styleClass="surface-card" spacing="7">
                 <HBox alignment="CENTER_LEFT" spacing="6">
                     <CheckBox fx:id="pinEnableCheckBox"
-                              text="Bật mã PIN bảo vệ"
-                              onAction="#handlePinConfigChanged"
-                              style="-fx-font-weight: bold;"/>
+                              text="Khóa PIN"
+                              onAction="#handlePinConfigChanged"/>
                     <TextField fx:id="myPinTextField"
                                promptText="4 số"
-                               prefWidth="68"
+                               prefWidth="64"
+                               styleClass="mono-text"
                                onKeyReleased="#handlePinConfigChanged"/>
                     <Button fx:id="copyInviteTokenButton"
-                            text="Copy Mã Mời"
+                            text="Mã Mời"
                             onAction="#handleCopyInviteToken"
-                            style="-fx-font-size: 11px;"/>
+                            styleClass="button-outlined"
+                            HBox.hgrow="ALWAYS"
+                            maxWidth="Infinity"/>
                 </HBox>
                 <CheckBox fx:id="askPushConfirmCheckBox"
-                          text="Hỏi xác nhận trước khi nhận tệp Push"
+                          text="Hỏi xác nhận khi nhận tệp Push"
                           onAction="#handlePushConfirmConfigChanged"
-                          style="-fx-font-size: 11.5px;"/>
+                          styleClass="subtle-caption"/>
                 <HBox alignment="CENTER_LEFT" spacing="6">
-                    <Label text="PIN đối tác:" style="-fx-font-size: 12px;"/>
+                    <Label text="PIN đối tác:" styleClass="subtle-caption"/>
                     <TextField fx:id="peerPinTextField"
-                               promptText="Nhập PIN (tự điền khi dán Mã Mời)"
+                               promptText="Tự điền khi dán Mã Mời"
+                               styleClass="mono-text"
                                HBox.hgrow="ALWAYS"/>
                 </HBox>
             </VBox>
 
+            <!-- Radar Peers Header -->
             <HBox alignment="CENTER_LEFT" spacing="6">
-                <Label text="Peers đang online (kèm Ping RTT ms)"
-                       style="-fx-font-weight: bold;"/>
-                <Label fx:id="peerCountLabel" text="(0)"/>
+                <Label text="RADAR THIẾT BỊ ONLINE" styleClass="section-header"/>
+                <Label fx:id="peerCountLabel" text="(0)" styleClass="mono-text"/>
+                <Region HBox.hgrow="ALWAYS"/>
+                <Button fx:id="deepScanButton"
+                        text="Quét LAN"
+                        onAction="#handleDeepScanLan"
+                        styleClass="flat"/>
             </HBox>
 
-            <ListView fx:id="peerListView" VBox.vgrow="ALWAYS"/>
-            <Label text="Mẹo: Kéo thả Tệp hoặc cả Thư mục vào tên Peer để gửi ngay!"
+            <!-- Custom ListCell<Peer> Card List -->
+            <ListView fx:id="peerListView"
+                      styleClass="peer-radar-list"
+                      VBox.vgrow="ALWAYS"/>
+
+            <Label fx:id="sharedFolderLabel"
+                   text="Shared: ./Shared (NIO WatchService)"
                    wrapText="true"
-                   style="-fx-font-size: 11px; -fx-opacity: 0.85;"/>
-            <Button fx:id="deepScanButton"
-                    text="Quét sâu mạng LAN / Radmin"
-                    onAction="#handleDeepScanLan"
-                    maxWidth="Infinity"
-                    styleClass="accent"/>
+                   styleClass="subtle-caption"/>
         </VBox>
     </left>
 
-    <!-- CENTER: TabPane gồm 3 Tab: (1) Chia sẻ & Giám sát, (2) Lịch sử & CSV, (3) Chat P2P Bảo mật AES-256-GCM -->
+    <!-- 3. CENTER WORKSPACE - FILE MANAGEMENT, BITTORRENT MATRIX, CSV HISTORY & P2P CHAT -->
     <center>
         <TabPane tabClosingPolicy="UNAVAILABLE">
-            <!-- TAB 1: Chia sẻ tệp/thư mục, BitTorrent 32-Chunk Matrix, AreaChart tốc độ & Network Log -->
-            <Tab text="Chia sẻ tệp &amp; Bản đồ mảnh Swarm">
-                <VBox spacing="7">
-                    <padding><Insets top="8" right="12" bottom="6" left="8"/></padding>
+            <!-- TAB 1: Quản lý Tệp chia sẻ, Bản đồ 32 mảnh Swarm & Nhật ký mạng -->
+            <Tab text="Kho Tệp Chia Sẻ &amp; Radar Mảnh Tải">
+                <VBox styleClass="center-workspace" spacing="10">
 
-                    <!-- Thanh công cụ phía trên: Tìm kiếm + Đóng gói Thư mục ZIP + Chọn thư mục chia sẻ + Làm mới -->
+                    <!-- Flat Toolbar: Search Input with Icon + Secondary Action Buttons -->
                     <HBox alignment="CENTER_LEFT" spacing="8">
-                        <TextField fx:id="searchTextField"
-                                   promptText="Tìm kiếm tệp trên mạng LAN / Radmin / Internet (theo tên, Peer, hoặc SHA-256)..."
-                                   HBox.hgrow="ALWAYS"/>
+                        <HBox styleClass="search-input-box" alignment="CENTER_LEFT" spacing="6" HBox.hgrow="ALWAYS">
+                            <Label fx:id="searchIconHolder"/>
+                            <TextField fx:id="searchTextField"
+                                       promptText="Tìm kiếm theo tên tệp, máy sở hữu hoặc mã băm SHA-256..."
+                                       styleClass="search-input-field"
+                                       HBox.hgrow="ALWAYS"/>
+                        </HBox>
                         <Button fx:id="shareFolderZipButton"
-                                text="Chia sẻ cả Thư mục (ZIP)"
+                                text="Chia sẻ Thư mục (ZIP)"
                                 onAction="#handleShareDirectoryAsZip"
-                                styleClass="accent"/>
+                                styleClass="button-outlined"/>
                         <Button fx:id="chooseSharedFolderButton"
-                                text="Đổi thư mục Shared"
-                                onAction="#handleChooseSharedFolder"/>
+                                text="Đổi Thư mục Shared"
+                                onAction="#handleChooseSharedFolder"
+                                styleClass="button-outlined"/>
                         <Button fx:id="refreshFilesButton"
                                 text="Làm mới"
-                                onAction="#handleRefreshFiles"/>
+                                onAction="#handleRefreshFiles"
+                                styleClass="flat"/>
                     </HBox>
 
-                    <!-- Bảng danh sách tệp chia sẻ (Hỗ trợ Drag & Drop cả Tệp lẫn Thư mục vào bảng) -->
-                    <TableView fx:id="sharedFileTable" VBox.vgrow="ALWAYS">
+                    <!-- Crafted TableView (40px rows, no vertical lines, right-aligned size, SHA-256 code pill) -->
+                    <TableView fx:id="sharedFileTable" styleClass="crafted-table" VBox.vgrow="ALWAYS">
                         <columnResizePolicy>
                             <TableView fx:constant="CONSTRAINED_RESIZE_POLICY"/>
                         </columnResizePolicy>
                         <columns>
-                            <TableColumn fx:id="fileNameColumn" text="Tên tệp (Kéo thả Tệp hoặc Thư mục vào đây)" prefWidth="235"/>
-                            <TableColumn fx:id="fileSizeColumn" text="Dung lượng" prefWidth="90"/>
-                            <TableColumn fx:id="fileSourcesColumn" text="Số nguồn (Peers)" prefWidth="115"/>
-                            <TableColumn fx:id="fileOwnerColumn" text="Máy sở hữu (Endpoint)" prefWidth="195"/>
-                            <TableColumn fx:id="fileHashColumn" text="Mã SHA-256" prefWidth="200"/>
+                            <TableColumn fx:id="fileNameColumn" text="Tên tệp / Thư mục nén" prefWidth="250"/>
+                            <TableColumn fx:id="fileSizeColumn" text="Dung lượng" prefWidth="105"/>
+                            <TableColumn fx:id="fileSourcesColumn" text="Nguồn tải (Swarm)" prefWidth="130"/>
+                            <TableColumn fx:id="fileOwnerColumn" text="Thiết bị sở hữu (Endpoint)" prefWidth="200"/>
+                            <TableColumn fx:id="fileHashColumn" text="Toàn vẹn SHA-256 (Click để Copy)" prefWidth="190"/>
                         </columns>
                     </TableView>
 
-                    <!-- GÓI 2 (MILESTONE 6): Bản đồ 32 mảnh tải thời gian thực (BitTorrent Chunk Matrix UI) -->
-                    <VBox spacing="3" style="-fx-background-color: rgba(15, 23, 42, 0.06); -fx-padding: 6 8 6 8; -fx-background-radius: 6;">
+                    <!-- BitTorrent 32-Chunk Matrix Panel -->
+                    <VBox styleClass="chunk-matrix-panel" spacing="5">
                         <HBox alignment="CENTER_LEFT" spacing="14">
-                            <Label text="Bản đồ 32 phân đoạn tải (BitTorrent Chunk Matrix):"
-                                   style="-fx-font-weight: bold; -fx-font-size: 11.5px;"/>
-                            <Label text="■ Chưa tải" style="-fx-text-fill: #9ca3af; -fx-font-size: 11px;"/>
-                            <Label text="■ Đang tải (Peer 1)" style="-fx-text-fill: #3b82f6; -fx-font-weight: bold; -fx-font-size: 11px;"/>
-                            <Label text="■ Đang tải (Swarm Peer 2+)" style="-fx-text-fill: #f59e0b; -fx-font-weight: bold; -fx-font-size: 11px;"/>
-                            <Label text="■ Hoàn tất (.part)" style="-fx-text-fill: #10b981; -fx-font-weight: bold; -fx-font-size: 11px;"/>
-                            <Label text="■ Tạm dừng / Failover" style="-fx-text-fill: #ef4444; -fx-font-weight: bold; -fx-font-size: 11px;"/>
+                            <Label text="BẢN ĐỒ 32 PHÂN ĐOẠN TẢI (BITTORRENT CHUNK MATRIX)" styleClass="section-header"/>
+                            <Region HBox.hgrow="ALWAYS"/>
+                            <Label text="■ Chưa tải" styleClass="legend-waiting"/>
+                            <Label text="■ Đang tải (Peer 1)" styleClass="legend-primary"/>
+                            <Label text="■ Swarm (Peer 2+)" styleClass="legend-swarm"/>
+                            <Label text="■ Hoàn tất (.part)" styleClass="legend-completed"/>
+                            <Label text="■ Tạm dừng / Failover" styleClass="legend-error"/>
                         </HBox>
-                        <HBox fx:id="chunkMatrixContainer" spacing="3" alignment="CENTER_LEFT" prefHeight="18"/>
+                        <HBox fx:id="chunkMatrixContainer" spacing="3" alignment="CENTER_LEFT" prefHeight="14"/>
                     </VBox>
 
-                    <!-- Khu vực dưới của Tab 1: Biểu đồ tốc độ AreaChart (30s) + Nhật ký sự kiện mạng -->
-                    <HBox spacing="10" prefHeight="180" minHeight="160">
-                        <VBox spacing="2" prefWidth="410" minWidth="350">
-                            <Label text="Biểu đồ tốc độ truyền tải thời gian thực (MB/s - 30 giây)"
-                                   style="-fx-font-weight: bold; -fx-font-size: 12px;"/>
-                            <AreaChart fx:id="speedTelemetryChart"
-                                       animated="false"
-                                       legendVisible="false"
-                                       createSymbols="false"
-                                       VBox.vgrow="ALWAYS">
-                                <xAxis>
-                                    <NumberAxis fx:id="speedTimeAxis"
-                                                label="Thời gian (giây)"
-                                                autoRanging="false"
-                                                lowerBound="0"
-                                                upperBound="30"
-                                                tickUnit="5"/>
-                                </xAxis>
-                                <yAxis>
-                                    <NumberAxis fx:id="speedValueAxis"
-                                                label="MB/s"
-                                                autoRanging="true"
-                                                forceZeroInRange="true"/>
-                                </yAxis>
-                            </AreaChart>
-                        </VBox>
-
-                        <!-- Nhật ký sự kiện mạng (Live Network Event Log) -->
-                        <VBox spacing="4" HBox.hgrow="ALWAYS">
-                            <HBox alignment="CENTER_LEFT" spacing="8">
-                                <Label text="Nhật ký sự kiện mạng (Real-time Network Log)"
-                                       style="-fx-font-weight: bold; -fx-font-size: 12px;"/>
-                                <Label text="(WatchService, PIN, Swarm Failover, QoS, AES-256)"
-                                       style="-fx-font-size: 11px;"/>
-                            </HBox>
-                            <TextArea fx:id="networkLogArea"
-                                      editable="false"
-                                      wrapText="true"
-                                      VBox.vgrow="ALWAYS"
-                                      style="-fx-font-family: 'Consolas', 'Monospaced'; -fx-font-size: 12px;"/>
-                        </VBox>
-                    </HBox>
+                    <!-- Live Network Telemetry Log -->
+                    <VBox spacing="4" prefHeight="135" minHeight="115">
+                        <HBox alignment="CENTER_LEFT" spacing="8">
+                            <Label text="NHẬT KÝ SỰ KIỆN MẠNG THỜI GIAN THỰC (NETWORK TELEMETRY LOG)" styleClass="section-header"/>
+                        </HBox>
+                        <TextArea fx:id="networkLogArea"
+                                  editable="false"
+                                  wrapText="true"
+                                  styleClass="telemetry-log-area"
+                                  VBox.vgrow="ALWAYS"/>
+                    </VBox>
                 </VBox>
             </Tab>
 
             <!-- TAB 2: Lịch sử truyền tải & Xuất báo cáo hiệu năng CSV -->
-            <Tab text="Lịch sử &amp; Thống kê (CSV)">
-                <VBox spacing="10">
-                    <padding><Insets top="12" right="12" bottom="10" left="10"/></padding>
-
+            <Tab text="Lịch Sử Truyền Tải &amp; Báo Cáo CSV">
+                <VBox styleClass="center-workspace" spacing="10">
                     <HBox alignment="CENTER_LEFT" spacing="10">
-                        <Label text="Thống kê hiệu năng truyền tải tệp (Gửi / Nhận / Swarm)"
-                               style="-fx-font-weight: bold; -fx-font-size: 14px;"/>
+                        <Label text="THỐNG KÊ HIỆU NĂNG TRUYỀN TẢI (PULL / PUSH / SWARM)" styleClass="section-header"/>
                         <Label fx:id="historyCountLabel"
                                text="(0 phiên hoàn tất)"
+                               styleClass="mono-text"
                                HBox.hgrow="ALWAYS" maxWidth="Infinity"/>
                         <Button fx:id="exportCsvButton"
                                 text="Xuất báo cáo CSV"
                                 onAction="#handleExportCsv"
-                                styleClass="success"/>
+                                styleClass="accent"/>
                     </HBox>
 
-                    <TableView fx:id="historyTable" VBox.vgrow="ALWAYS">
+                    <TableView fx:id="historyTable" styleClass="crafted-table" VBox.vgrow="ALWAYS">
                         <columnResizePolicy>
                             <TableView fx:constant="CONSTRAINED_RESIZE_POLICY"/>
                         </columnResizePolicy>
                         <columns>
                             <TableColumn fx:id="historyTimeColumn" text="Thời gian" prefWidth="135"/>
-                            <TableColumn fx:id="historyFileColumn" text="Tên tệp" prefWidth="180"/>
+                            <TableColumn fx:id="historyFileColumn" text="Tên tệp" prefWidth="185"/>
                             <TableColumn fx:id="historySizeColumn" text="Dung lượng" prefWidth="95"/>
                             <TableColumn fx:id="historyPeerColumn" text="Peer đối tác" prefWidth="150"/>
-                            <TableColumn fx:id="historyDirectionColumn" text="Chiều truyền" prefWidth="115"/>
-                            <TableColumn fx:id="historySpeedColumn" text="Tốc độ TB (MB/s)" prefWidth="115"/>
-                            <TableColumn fx:id="historyDurationColumn" text="Thời gian hoàn thành" prefWidth="125"/>
-                            <TableColumn fx:id="historyHashStatusColumn" text="Kết quả SHA-256" prefWidth="130"/>
+                            <TableColumn fx:id="historyDirectionColumn" text="Chiều truyền" prefWidth="120"/>
+                            <TableColumn fx:id="historySpeedColumn" text="Tốc độ TB" prefWidth="110"/>
+                            <TableColumn fx:id="historyDurationColumn" text="Thời gian" prefWidth="110"/>
+                            <TableColumn fx:id="historyHashStatusColumn" text="Toàn vẹn SHA-256" prefWidth="135"/>
                         </columns>
                     </TableView>
                 </VBox>
             </Tab>
 
-            <!-- TAB 3 (MILESTONE 6 - GÓI 1 & GÓI 5): Kênh Chat P2P Tức thời Mã hóa Đầu-Cuối AES-256-GCM -->
-            <Tab text="Chat P2P Bảo mật (AES-256-GCM)">
-                <VBox spacing="10">
-                    <padding><Insets top="12" right="12" bottom="10" left="10"/></padding>
-
+            <!-- TAB 3: Kênh Chat P2P Bảo mật Đầu-Cuối AES-256-GCM -->
+            <Tab text="Kênh Chat P2P (AES-256-GCM)">
+                <VBox styleClass="center-workspace" spacing="10">
                     <HBox alignment="CENTER_LEFT" spacing="10">
-                        <Label text="Kênh Giao tiếp P2P Tức thời — Mã hóa đầu-cuối AES-256-GCM (PBKDF2 + 12-byte IV)"
-                               style="-fx-font-weight: bold; -fx-font-size: 13.5px;"/>
+                        <Label text="GIAO TIẾP P2P TỨC THỜI — MÃ HÓA ĐẦU-CUỐI AES-256-GCM (PBKDF2 + 12-BYTE IV)"
+                               styleClass="section-header"/>
                     </HBox>
 
                     <TextArea fx:id="chatHistoryArea"
                               editable="false"
                               wrapText="true"
                               promptText="Tin nhắn P2P được mã hóa AES-256-GCM giữa bạn và các Peer sẽ hiển thị tại đây..."
-                              VBox.vgrow="ALWAYS"
-                              style="-fx-font-family: 'Consolas', 'Monospaced'; -fx-font-size: 13px;"/>
+                              styleClass="telemetry-log-area"
+                              VBox.vgrow="ALWAYS"/>
 
                     <HBox alignment="CENTER_LEFT" spacing="8">
                         <TextField fx:id="chatInputField"
-                                   promptText="Nhập tin nhắn, mã PIN hoặc dán đoạn code/link cần gửi nhanh cho Peer..."
+                                   promptText="Nhập tin nhắn, mã mời hoặc đoạn cấu hình cần gửi nhanh cho Peer..."
                                    onAction="#handleSendChatMessage"
                                    HBox.hgrow="ALWAYS"/>
-                        <Button text="Gửi tới Peer đang chọn"
+                        <Button fx:id="sendChatButton"
+                                text="Gửi tới Peer đang chọn"
                                 onAction="#handleSendChatMessage"
                                 styleClass="accent"/>
-                        <Button text="Gửi toàn mạng (Broadcast)"
+                        <Button fx:id="broadcastChatButton"
+                                text="Gửi Broadcast toàn mạng"
                                 onAction="#handleBroadcastChatMessage"
-                                styleClass="success"/>
+                                styleClass="button-outlined"/>
                     </HBox>
                 </VBox>
             </Tab>
         </TabPane>
     </center>
 
-    <!-- BOTTOM: Transfer controls (Download, Pause, Resume, Cancel, Push File, Push Folder, QoS Limiter), status & progress bar -->
+    <!-- 4. BOTTOM TRANSFER DOCK: Left (Transfer Status + 6px Progress + QoS) | Center (Smooth AreaChart) | Right (Action Hierarchy) -->
     <bottom>
-        <HBox alignment="CENTER_LEFT" spacing="7">
-            <padding><Insets top="8" right="16" bottom="10" left="16"/></padding>
-            <Button fx:id="downloadSelectedButton"
-                    text="Tải tệp đã chọn"
-                    onAction="#handleDownloadSelectedFile"
-                    defaultButton="true"
-                    styleClass="accent"/>
-            <Button fx:id="pauseButton"
-                    text="Tạm dừng"
-                    onAction="#handlePauseDownload"/>
-            <Button fx:id="resumeButton"
-                    text="Tiếp tục"
-                    onAction="#handleResumeDownload"
-                    styleClass="success"/>
-            <Button fx:id="cancelButton"
-                    text="Hủy"
-                    onAction="#handleCancelDownload"
-                    styleClass="danger"/>
-            <Button fx:id="chooseFileButton"
-                    text="Gửi tệp (Push)"
-                    onAction="#handleChooseFile"/>
-            <Button fx:id="pushFolderButton"
-                    text="Gửi Thư mục (ZIP)"
-                    onAction="#handlePushDirectory"/>
+        <HBox styleClass="bottom-transfer-dock" alignment="CENTER_LEFT" spacing="16" prefHeight="96">
 
-            <!-- GÓI 4 (MILESTONE 6): Bộ giới hạn băng thông chủ động (Token Bucket QoS) -->
-            <Label text="Giới hạn tốc độ:" style="-fx-font-size: 12px; -fx-font-weight: bold;"/>
-            <ComboBox fx:id="bandwidthLimitComboBox"
-                      onAction="#handleBandwidthLimitChanged"
-                      prefWidth="135"/>
+            <!-- Left Dock: Active Transfer Status + Thin 6px ProgressBar + QoS Limiter -->
+            <VBox spacing="6" prefWidth="360" minWidth="320" alignment="CENTER_LEFT">
+                <HBox alignment="CENTER_LEFT" spacing="8">
+                    <Label fx:id="statusLabel"
+                           text="Trạng thái: Sẵn sàng"
+                           HBox.hgrow="ALWAYS"
+                           maxWidth="Infinity"/>
+                    <Label fx:id="liveSpeedBadgeLabel"
+                           text="0.00 MB/s"
+                           styleClass="mono-metric-large"/>
+                </HBox>
+                <ProgressBar fx:id="transferProgressBar"
+                             progress="0.0"
+                             maxWidth="Infinity"
+                             styleClass="thin-progress-bar"/>
+                <HBox alignment="CENTER_LEFT" spacing="8">
+                    <Label text="Giới hạn băng thông (QoS):" styleClass="subtle-caption"/>
+                    <ComboBox fx:id="bandwidthLimitComboBox"
+                              onAction="#handleBandwidthLimitChanged"
+                              prefWidth="140"/>
+                </HBox>
+            </VBox>
 
-            <Label fx:id="statusLabel" text="Trạng thái: Sẵn sàng" HBox.hgrow="ALWAYS" maxWidth="Infinity"/>
-            <ProgressBar fx:id="transferProgressBar" progress="0.0" prefWidth="185"/>
+            <!-- Center Dock: Smooth Real-time Speed AreaChart (30s Sliding Window, Minimal Chrome) -->
+            <VBox alignment="CENTER" HBox.hgrow="ALWAYS" prefHeight="76" maxHeight="80">
+                <AreaChart fx:id="speedTelemetryChart"
+                           animated="false"
+                           legendVisible="false"
+                           createSymbols="false"
+                           horizontalGridLinesVisible="true"
+                           verticalGridLinesVisible="false"
+                           styleClass="dock-telemetry-chart"
+                           VBox.vgrow="ALWAYS">
+                    <xAxis>
+                        <NumberAxis fx:id="speedTimeAxis"
+                                    autoRanging="false"
+                                    lowerBound="0"
+                                    upperBound="30"
+                                    tickUnit="10"
+                                    tickLabelsVisible="false"
+                                    tickMarkVisible="false"/>
+                    </xAxis>
+                    <yAxis>
+                        <NumberAxis fx:id="speedValueAxis"
+                                    autoRanging="true"
+                                    forceZeroInRange="true"
+                                    tickLabelsVisible="true"/>
+                    </yAxis>
+                </AreaChart>
+            </VBox>
+
+            <!-- Right Dock: Strict Button Hierarchy (1 Primary Accent + Secondary Outlined + Ghost Controls) -->
+            <HBox alignment="CENTER_RIGHT" spacing="7">
+                <Button fx:id="downloadSelectedButton"
+                        text="Tải tệp"
+                        onAction="#handleDownloadSelectedFile"
+                        defaultButton="true"
+                        styleClass="accent"/>
+                <Button fx:id="chooseFileButton"
+                        text="Gửi tệp"
+                        onAction="#handleChooseFile"
+                        styleClass="button-outlined"/>
+                <Button fx:id="pushFolderButton"
+                        text="Gửi Thư mục"
+                        onAction="#handlePushDirectory"
+                        styleClass="button-outlined"/>
+
+                <Button fx:id="pauseButton"
+                        text="Tạm dừng"
+                        onAction="#handlePauseDownload"
+                        styleClass="flat"/>
+                <Button fx:id="resumeButton"
+                        text="Tiếp tục"
+                        onAction="#handleResumeDownload"
+                        styleClass="flat"/>
+                <Button fx:id="cancelButton"
+                        text="Hủy"
+                        onAction="#handleCancelDownload"
+                        styleClass="flat"/>
+            </HBox>
         </HBox>
     </bottom>
 </BorderPane>

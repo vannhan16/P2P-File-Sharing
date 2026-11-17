@@ -1,0 +1,505 @@
+/* ==========================================================================
+   JavaFX Crafted Desktop UI Design System (Linear / LocalSend / Fluent Style)
+   3-Tier Surface Palette + Monospace Telemetry + Zero Inline Style Clutter
+   ========================================================================== */
+
+.root {
+    -fx-font-family: "Inter", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+    -fx-font-size: 13px;
+    -fx-background-color: #0D1117;
+}
+
+.root.theme-light {
+    -fx-background-color: #F8FAFC;
+}
+
+/* --------------------------------------------------------------------------
+   1. TYPOGRAPHY & TECHNICAL MONOSPACE CLASSES
+   -------------------------------------------------------------------------- */
+
+.app-brand-title {
+    -fx-font-size: 15.5px;
+    -fx-font-weight: bold;
+    -fx-text-fill: #F0F6FC;
+}
+
+.root.theme-light .app-brand-title {
+    -fx-text-fill: #0F172A;
+}
+
+.section-header {
+    -fx-font-size: 12px;
+    -fx-font-weight: bold;
+    -fx-text-fill: #8B949E;
+}
+
+.root.theme-light .section-header {
+    -fx-text-fill: #475569;
+}
+
+.subtle-caption {
+    -fx-font-size: 11.5px;
+    -fx-text-fill: #8B949E;
+}
+
+.root.theme-light .subtle-caption {
+    -fx-text-fill: #64748B;
+}
+
+.mono-text {
+    -fx-font-family: "JetBrains Mono", "Cascadia Code", "Consolas", monospace;
+    -fx-font-size: 12px;
+}
+
+.mono-metric-large {
+    -fx-font-family: "JetBrains Mono", "Cascadia Code", "Consolas", monospace;
+    -fx-font-size: 13px;
+    -fx-font-weight: bold;
+    -fx-text-fill: #3B82F6;
+}
+
+/* --------------------------------------------------------------------------
+   2. TOP HEADER BAR (52px) & NETWORK IDENTITY PILLS
+   -------------------------------------------------------------------------- */
+
+.top-header-bar {
+    -fx-background-color: #161B22;
+    -fx-border-color: transparent transparent #30363D transparent;
+    -fx-border-width: 0 0 1px 0;
+    -fx-min-height: 52px;
+    -fx-pref-height: 52px;
+    -fx-padding: 0 16px 0 16px;
+}
+
+.root.theme-light .top-header-bar {
+    -fx-background-color: #FFFFFF;
+    -fx-border-color: transparent transparent #E2E8F0 transparent;
+}
+
+.network-pill {
+    -fx-font-family: "JetBrains Mono", "Cascadia Code", "Consolas", monospace;
+    -fx-font-size: 11.5px;
+    -fx-font-weight: bold;
+    -fx-padding: 4px 10px 4px 10px;
+    -fx-background-radius: 6px;
+    -fx-border-radius: 6px;
+}
+
+.pill-online {
+    -fx-text-fill: #10B981;
+    -fx-background-color: rgba(16, 185, 129, 0.12);
+    -fx-border-color: rgba(16, 185, 129, 0.28);
+    -fx-border-width: 1px;
+}
+
+.pill-sync {
+    -fx-text-fill: #3B82F6;
+    -fx-background-color: rgba(59, 130, 246, 0.12);
+    -fx-border-color: rgba(59, 130, 246, 0.28);
+    -fx-border-width: 1px;
+}
+
+.pill-warning {
+    -fx-text-fill: #F59E0B;
+    -fx-background-color: rgba(245, 158, 11, 0.12);
+    -fx-border-color: rgba(245, 158, 11, 0.28);
+    -fx-border-width: 1px;
+}
+
+.pill-error {
+    -fx-text-fill: #EF4444;
+    -fx-background-color: rgba(239, 68, 68, 0.12);
+    -fx-border-color: rgba(239, 68, 68, 0.28);
+    -fx-border-width: 1px;
+}
+
+.pill-neutral {
+    -fx-text-fill: #8B949E;
+    -fx-background-color: rgba(139, 148, 158, 0.12);
+    -fx-border-color: rgba(139, 148, 158, 0.24);
+    -fx-border-width: 1px;
+}
+
+/* --------------------------------------------------------------------------
+   3. LEFT SIDEBAR - DEVICE RADAR (280px, Surface 1)
+   -------------------------------------------------------------------------- */
+
+.sidebar-radar {
+    -fx-background-color: #161B22;
+    -fx-border-color: transparent #30363D transparent transparent;
+    -fx-border-width: 0 1px 0 0;
+    -fx-padding: 14px 12px 14px 14px;
+}
+
+.root.theme-light .sidebar-radar {
+    -fx-background-color: #FFFFFF;
+    -fx-border-color: transparent #E2E8F0 transparent transparent;
+}
+
+.surface-card {
+    -fx-background-color: #0D1117;
+    -fx-border-color: #30363D;
+    -fx-border-width: 1px;
+    -fx-background-radius: 8px;
+    -fx-border-radius: 8px;
+    -fx-padding: 10px;
+}
+
+.root.theme-light .surface-card {
+    -fx-background-color: #F8FAFC;
+    -fx-border-color: #E2E8F0;
+}
+
+/* Custom Peer ListView & Peer Card Cells */
+.peer-radar-list {
+    -fx-background-color: transparent;
+    -fx-border-color: #30363D;
+    -fx-border-width: 1px;
+    -fx-background-radius: 8px;
+    -fx-border-radius: 8px;
+    -fx-padding: 4px;
+}
+
+.root.theme-light .peer-radar-list {
+    -fx-border-color: #E2E8F0;
+}
+
+.peer-radar-list .list-cell {
+    -fx-background-color: transparent;
+    -fx-padding: 3px 2px 3px 2px;
+    -fx-border-color: transparent;
+}
+
+.peer-radar-list .list-cell:Empty {
+    -fx-background-color: transparent;
+}
+
+.peer-card-item {
+    -fx-background-color: #0D1117;
+    -fx-border-color: #30363D;
+    -fx-border-width: 1px;
+    -fx-background-radius: 7px;
+    -fx-border-radius: 7px;
+    -fx-padding: 8px 10px 8px 10px;
+}
+
+.root.theme-light .peer-card-item {
+    -fx-background-color: #F8FAFC;
+    -fx-border-color: #E2E8F0;
+}
+
+.peer-radar-list .list-cell:filled:hover .peer-card-item {
+    -fx-background-color: #21262D;
+    -fx-border-color: #3B82F6;
+}
+
+.root.theme-light .peer-radar-list .list-cell:filled:hover .peer-card-item {
+    -fx-background-color: #F1F5F9;
+    -fx-border-color: #3B82F6;
+}
+
+.peer-radar-list .list-cell:filled:selected .peer-card-item {
+    -fx-background-color: rgba(59, 130, 246, 0.15);
+    -fx-border-color: #3B82F6;
+}
+
+.peer-card-drop-target {
+    -fx-background-color: rgba(16, 185, 129, 0.18) !important;
+    -fx-border-color: #10B981 !important;
+    -fx-border-width: 1.5px !important;
+}
+
+.peer-online-dot {
+    -fx-fill: #10B981;
+}
+
+.peer-card-hostname {
+    -fx-font-size: 13px;
+    -fx-font-weight: bold;
+    -fx-text-fill: #F0F6FC;
+}
+
+.root.theme-light .peer-card-hostname {
+    -fx-text-fill: #0F172A;
+}
+
+.peer-card-ip {
+    -fx-font-family: "JetBrains Mono", "Cascadia Code", "Consolas", monospace;
+    -fx-font-size: 11px;
+    -fx-text-fill: #8B949E;
+}
+
+.root.theme-light .peer-card-ip {
+    -fx-text-fill: #64748B;
+}
+
+.peer-rtt-badge {
+    -fx-font-family: "JetBrains Mono", "Cascadia Code", "Consolas", monospace;
+    -fx-font-size: 10.5px;
+    -fx-font-weight: bold;
+    -fx-text-fill: #10B981;
+    -fx-background-color: rgba(16, 185, 129, 0.12);
+    -fx-padding: 1px 6px 1px 6px;
+    -fx-background-radius: 4px;
+}
+
+/* --------------------------------------------------------------------------
+   4. CENTER WORKSPACE, TOOLBAR & TABLEVIEW REFINEMENT
+   -------------------------------------------------------------------------- */
+
+.center-workspace {
+    -fx-padding: 10px 16px 10px 14px;
+}
+
+.search-input-box {
+    -fx-background-color: #161B22;
+    -fx-border-color: #30363D;
+    -fx-border-width: 1px;
+    -fx-background-radius: 7px;
+    -fx-border-radius: 7px;
+    -fx-padding: 0 10px 0 10px;
+}
+
+.root.theme-light .search-input-box {
+    -fx-background-color: #FFFFFF;
+    -fx-border-color: #CBD5E1;
+}
+
+.search-input-field {
+    -fx-background-color: transparent;
+    -fx-border-color: transparent;
+}
+
+.crafted-table {
+    -fx-background-color: #161B22;
+    -fx-border-color: #30363D;
+    -fx-border-width: 1px;
+    -fx-background-radius: 8px;
+    -fx-border-radius: 8px;
+    -fx-table-cell-border-color: transparent;
+}
+
+.root.theme-light .crafted-table {
+    -fx-background-color: #FFFFFF;
+    -fx-border-color: #E2E8F0;
+}
+
+.crafted-table .column-header-background {
+    -fx-background-color: #0D1117;
+    -fx-border-color: transparent transparent #30363D transparent;
+    -fx-border-width: 0 0 1px 0;
+}
+
+.root.theme-light .crafted-table .column-header-background {
+    -fx-background-color: #F8FAFC;
+    -fx-border-color: transparent transparent #E2E8F0 transparent;
+}
+
+.crafted-table .column-header {
+    -fx-background-color: transparent;
+    -fx-border-color: transparent;
+    -fx-size: 36px;
+}
+
+.crafted-table .table-row-cell {
+    -fx-cell-size: 40px;
+    -fx-border-color: transparent transparent rgba(139, 148, 158, 0.10) transparent;
+    -fx-border-width: 0 0 1px 0;
+}
+
+.crafted-table .table-cell {
+    -fx-alignment: CENTER_LEFT;
+    -fx-border-color: transparent;
+    -fx-padding: 0 10px 0 10px;
+}
+
+.cell-right-mono {
+    -fx-alignment: CENTER_RIGHT !important;
+    -fx-font-family: "JetBrains Mono", "Cascadia Code", "Consolas", monospace;
+    -fx-font-size: 12px;
+}
+
+/* SHA-256 Code Pill Badge inside TableCell */
+.sha-code-badge {
+    -fx-font-family: "JetBrains Mono", "Cascadia Code", "Consolas", monospace;
+    -fx-font-size: 11.5px;
+    -fx-text-fill: #3B82F6;
+    -fx-background-color: rgba(59, 130, 246, 0.12);
+    -fx-border-color: rgba(59, 130, 246, 0.25);
+    -fx-border-width: 1px;
+    -fx-padding: 2px 8px 2px 8px;
+    -fx-background-radius: 5px;
+    -fx-border-radius: 5px;
+    -fx-cursor: hand;
+}
+
+.sha-code-badge:hover {
+    -fx-background-color: rgba(59, 130, 246, 0.24);
+}
+
+/* Empty Table Placeholder */
+.empty-placeholder-box {
+    -fx-alignment: CENTER;
+    -fx-padding: 28px;
+}
+
+.empty-placeholder-title {
+    -fx-font-size: 14px;
+    -fx-font-weight: bold;
+    -fx-text-fill: #8B949E;
+}
+
+.empty-placeholder-subtitle {
+    -fx-font-size: 12px;
+    -fx-text-fill: #6E7681;
+}
+
+/* --------------------------------------------------------------------------
+   5. BITTORRENT 32-CHUNK MATRIX BAR & TELEMETRY LOG
+   -------------------------------------------------------------------------- */
+
+.chunk-matrix-panel {
+    -fx-background-color: #161B22;
+    -fx-border-color: #30363D;
+    -fx-border-width: 1px;
+    -fx-background-radius: 8px;
+    -fx-border-radius: 8px;
+    -fx-padding: 7px 12px 8px 12px;
+}
+
+.root.theme-light .chunk-matrix-panel {
+    -fx-background-color: #FFFFFF;
+    -fx-border-color: #E2E8F0;
+}
+
+.chunk-cell {
+    -fx-background-radius: 3px;
+}
+
+.chunk-waiting {
+    -fx-background-color: #21262D;
+}
+
+.root.theme-light .chunk-waiting {
+    -fx-background-color: #E2E8F0;
+}
+
+.chunk-active-primary {
+    -fx-background-color: #3B82F6;
+}
+
+.chunk-active-swarm {
+    -fx-background-color: #F59E0B;
+}
+
+.chunk-completed {
+    -fx-background-color: #10B981;
+}
+
+.chunk-paused-error {
+    -fx-background-color: #EF4444;
+}
+
+.legend-waiting {
+    -fx-font-size: 11px;
+    -fx-text-fill: #8B949E;
+}
+
+.legend-primary {
+    -fx-font-size: 11px;
+    -fx-font-weight: bold;
+    -fx-text-fill: #3B82F6;
+}
+
+.legend-swarm {
+    -fx-font-size: 11px;
+    -fx-font-weight: bold;
+    -fx-text-fill: #F59E0B;
+}
+
+.legend-completed {
+    -fx-font-size: 11px;
+    -fx-font-weight: bold;
+    -fx-text-fill: #10B981;
+}
+
+.legend-error {
+    -fx-font-size: 11px;
+    -fx-font-weight: bold;
+    -fx-text-fill: #EF4444;
+}
+
+.telemetry-log-area {
+    -fx-font-family: "JetBrains Mono", "Cascadia Code", "Consolas", monospace;
+    -fx-font-size: 11.5px;
+    -fx-background-color: #161B22;
+    -fx-border-color: #30363D;
+    -fx-border-width: 1px;
+    -fx-background-radius: 8px;
+    -fx-border-radius: 8px;
+}
+
+.root.theme-light .telemetry-log-area {
+    -fx-background-color: #FFFFFF;
+    -fx-border-color: #E2E8F0;
+}
+
+/* --------------------------------------------------------------------------
+   6. BOTTOM TRANSFER DOCK (Progress + Smooth AreaChart + Controls)
+   -------------------------------------------------------------------------- */
+
+.bottom-transfer-dock {
+    -fx-background-color: #161B22;
+    -fx-border-color: #30363D transparent transparent transparent;
+    -fx-border-width: 1px 0 0 0;
+    -fx-padding: 10px 16px 10px 16px;
+}
+
+.root.theme-light .bottom-transfer-dock {
+    -fx-background-color: #FFFFFF;
+    -fx-border-color: #E2E8F0 transparent transparent transparent;
+}
+
+.thin-progress-bar {
+    -fx-pref-height: 7px;
+    -fx-min-height: 7px;
+    -fx-max-height: 7px;
+}
+
+.thin-progress-bar > .track {
+    -fx-background-color: #21262D;
+    -fx-background-radius: 4px;
+}
+
+.root.theme-light .thin-progress-bar > .track {
+    -fx-background-color: #E2E8F0;
+}
+
+.thin-progress-bar > .bar {
+    -fx-background-color: #3B82F6;
+    -fx-background-radius: 4px;
+    -fx-background-insets: 0;
+}
+
+/* Smooth AreaChart inside Bottom Dock */
+.dock-telemetry-chart {
+    -fx-padding: 0;
+}
+
+.dock-telemetry-chart .chart-plot-background {
+    -fx-background-color: transparent;
+}
+
+.dock-telemetry-chart .chart-vertical-grid-lines,
+.dock-telemetry-chart .chart-horizontal-grid-lines {
+    -fx-stroke: rgba(139, 148, 158, 0.12);
+}
+
+.dock-telemetry-chart .default-color0.chart-series-area-line {
+    -fx-stroke: #3B82F6;
+    -fx-stroke-width: 2px;
+}
+
+.dock-telemetry-chart .default-color0.chart-series-area-fill {
+    -fx-fill: rgba(59, 130, 246, 0.18);
+}

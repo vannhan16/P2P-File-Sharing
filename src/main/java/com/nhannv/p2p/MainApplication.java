@@ -1,6 +1,6 @@
 package com.nhannv.p2p;
 
-import atlantafx.base.theme.NordDark;
+import atlantafx.base.theme.PrimerDark;
 import atlantafx.base.theme.PrimerLight;
 import com.nhannv.p2p.ui.MainController;
 import javafx.application.Application;
@@ -13,27 +13,29 @@ import java.io.IOException;
 import java.net.URL;
 
 /**
- * Điểm khởi chạy ứng dụng P2P LAN File Sharing (Milestone 4 - Final Technical Milestone).
+ * Điểm khởi chạy ứng dụng P2P LAN &amp; Internet File Sharing (Crafted Desktop UI Edition).
  * <p>
- * Tích hợp thư viện giao diện hiện đại <b>AtlantaFX</b> (hỗ trợ chuyển đổi trực tiếp giữa
- * {@link PrimerLight} và {@link NordDark}).
+ * Kết hợp hệ thống Design System 3-Tier Surface ({@code app-theme.css}) cùng nền tảng
+ * <b>AtlantaFX</b> ({@link PrimerDark} / {@link PrimerLight}) và bộ Vector Icon <b>Ikonli Feather</b>.
  */
 public class MainApplication extends Application {
 
     private static final String MAIN_VIEW = "/com/nhannv/p2p/layout/MainView.fxml";
-    private static final String APP_TITLE = "P2P LAN & Internet File Sharing - VKU (M6 Enterprise: AES-256, BitTorrent Matrix, Folder ZIP, QoS & Chat)";
-    private static final double DEFAULT_WIDTH = 1280;
-    private static final double DEFAULT_HEIGHT = 790;
+    private static final String APP_CSS = "/com/nhannv/p2p/css/app-theme.css";
+    private static final String APP_TITLE = "P2P LAN & Internet File Sharing — VKU Enterprise Edition";
+    private static final double DEFAULT_WIDTH = 1320;
+    private static final double DEFAULT_HEIGHT = 820;
 
-    private static boolean darkThemeActive = false;
+    private static boolean darkThemeActive = true;
+    private static Scene activeScene;
 
     /** Giữ tham chiếu Controller để giải phóng tài nguyên mạng khi ứng dụng tắt. */
     private MainController mainController;
 
     @Override
     public void start(Stage stage) throws IOException {
-        // Khoác giao diện hiện đại AtlantaFX (mặc định Primer Light, có nút đổi sang Nord Dark trên UI).
-        Application.setUserAgentStylesheet(new PrimerLight().getUserAgentStylesheet());
+        // Mặc định khởi chạy ở chế độ PrimerDark chuẩn kỹ thuật (Surface 0 = #0D1117, Surface 1 = #161B22)
+        Application.setUserAgentStylesheet(new PrimerDark().getUserAgentStylesheet());
 
         URL viewUrl = MainApplication.class.getResource(MAIN_VIEW);
         if (viewUrl == null) {
@@ -45,21 +47,38 @@ public class MainApplication extends Application {
         mainController = loader.getController();
 
         Scene scene = new Scene(root, DEFAULT_WIDTH, DEFAULT_HEIGHT);
+        URL cssUrl = MainApplication.class.getResource(APP_CSS);
+        if (cssUrl != null) {
+            scene.getStylesheets().add(cssUrl.toExternalForm());
+        }
+        activeScene = scene;
+
         stage.setTitle(APP_TITLE);
         stage.setScene(scene);
-        stage.setMinWidth(860);
-        stage.setMinHeight(600);
+        stage.setMinWidth(980);
+        stage.setMinHeight(660);
         stage.show();
     }
 
-    /** Chuyển đổi qua lại giữa giao diện Primer Light và Nord Dark của AtlantaFX. */
+    /** Chuyển đổi qua lại giữa giao diện PrimerDark và PrimerLight kèm cập nhật lớp CSS. */
     public static boolean toggleTheme() {
         darkThemeActive = !darkThemeActive;
         if (darkThemeActive) {
-            Application.setUserAgentStylesheet(new NordDark().getUserAgentStylesheet());
+            Application.setUserAgentStylesheet(new PrimerDark().getUserAgentStylesheet());
+            if (activeScene != null && activeScene.getRoot() != null) {
+                activeScene.getRoot().getStyleClass().remove("theme-light");
+            }
         } else {
             Application.setUserAgentStylesheet(new PrimerLight().getUserAgentStylesheet());
+            if (activeScene != null && activeScene.getRoot() != null
+                    && !activeScene.getRoot().getStyleClass().contains("theme-light")) {
+                activeScene.getRoot().getStyleClass().add("theme-light");
+            }
         }
+        return darkThemeActive;
+    }
+
+    public static boolean isDarkThemeActive() {
         return darkThemeActive;
     }
 

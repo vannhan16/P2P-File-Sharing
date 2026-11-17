@@ -3,6 +3,9 @@ module com.p2pfilesharing {
     requires javafx.fxml;
     requires java.logging;
     requires atlantafx.base;
+    requires org.kordamp.ikonli.core;
+    requires org.kordamp.ikonli.javafx;
+    requires org.kordamp.ikonli.feather;
 
     // P2P application packages
     opens com.nhannv.p2p.ui to javafx.fxml;
