@@ -1,6 +1,8 @@
 package com.nhannv.p2p.ui;
 
 import com.nhannv.p2p.MainApplication;
+import com.nhannv.p2p.ai.AIManager;
+import com.nhannv.p2p.ai.HeuristicOfflineAIService;
 import com.nhannv.p2p.model.Peer;
 import com.nhannv.p2p.model.SharedFile;
 import com.nhannv.p2p.model.TransferHistoryItem;
@@ -596,18 +598,75 @@ public class MainController implements PeerDiscoveryListener {
     private void configureSharedFileTableColumns() {
         fileNameColumn.setCellValueFactory(cell -> new ReadOnlyStringWrapper(cell.getValue().fileName()));
         fileNameColumn.setCellFactory(col -> new TableCell<>() {
+            private final HBox cellBox = new HBox(7);
+            private final Label nameLabel = new Label();
+            private final Label tagBadge = new Label();
+            private final Label warningBadge = new Label();
+            private final Tooltip aiTooltip = new Tooltip();
+
+            {
+                cellBox.setAlignment(Pos.CENTER_LEFT);
+                tagBadge.getStyleClass().addAll("network-pill", "pill-neutral");
+                warningBadge.getStyleClass().addAll("network-pill", "pill-warning");
+                warningBadge.setText("Sensitive");
+                cellBox.getChildren().addAll(nameLabel, warningBadge, tagBadge);
+            }
+
             @Override
             protected void updateItem(String name, boolean empty) {
                 super.updateItem(name, empty);
-                if (empty || name == null) {
+                if (empty || name == null || getTableRow() == null || getTableRow().getItem() == null) {
                     setText(null);
                     setGraphic(null);
+                    setTooltip(null);
                 } else {
+                    SharedFile sf = getTableRow().getItem();
                     boolean isArchive = name.toLowerCase(Locale.ROOT).endsWith(".zip");
-                    setGraphic(icon(isArchive ? Feather.ARCHIVE : Feather.FILE_TEXT, 14,
+                    nameLabel.setGraphic(icon(isArchive ? Feather.ARCHIVE : Feather.FILE_TEXT, 14,
                             isArchive ? "#F59E0B" : "#3B82F6"));
-                    setGraphicTextGap(8);
-                    setText(name);
+                    nameLabel.setGraphicTextGap(8);
+                    nameLabel.setText(name);
+
+                    if (sf.hasSensitiveWarning()) {
+                        warningBadge.setGraphic(icon(Feather.ALERT_TRIANGLE, 11, "#F59E0B"));
+                        warningBadge.setGraphicTextGap(4);
+                        warningBadge.setVisible(true);
+                        warningBadge.setManaged(true);
+                    } else {
+                        warningBadge.setVisible(false);
+                        warningBadge.setManaged(false);
+                    }
+
+                    String primaryTag = sf.primaryTagBadge();
+                    if (!primaryTag.isBlank()) {
+                        tagBadge.setText(primaryTag);
+                        tagBadge.setVisible(true);
+                        tagBadge.setManaged(true);
+                    } else {
+                        tagBadge.setVisible(false);
+                        tagBadge.setManaged(false);
+                    }
+
+                    if (sf.hasAiMetadata() || sf.hasSensitiveWarning()) {
+                        StringBuilder tip = new StringBuilder();
+                        tip.append("Tệp: ").append(sf.fileName()).append(" (").append(sf.formattedSize()).append(")\n");
+                        if (!sf.aiTags().isBlank()) {
+                            tip.append("Thẻ ngữ nghĩa (AI Tags): ").append(sf.aiTags()).append("\n");
+                        }
+                        if (!sf.aiSummary().isBlank()) {
+                            tip.append("Tóm tắt AI: ").append(sf.aiSummary());
+                        }
+                        if (sf.hasSensitiveWarning()) {
+                            tip.append("\n[!] ").append(sf.sensitiveWarning());
+                        }
+                        aiTooltip.setText(tip.toString().trim());
+                        setTooltip(aiTooltip);
+                    } else {
+                        setTooltip(null);
+                    }
+
+                    setText(null);
+                    setGraphic(cellBox);
                 }
             }
         });
@@ -1549,14 +1608,44 @@ public class MainController implements PeerDiscoveryListener {
         t.start();
     }
 
+    /**
+     * Tìm kiếm ngữ nghĩa đa từ khóa (Multi-Token &amp; Accent-Insensitive Semantic Search — Phase 2):
+     * So khớp đồng thời trên {@code fileName}, {@code aiTags}, {@code aiSummary}, {@code ownerName},
+     * {@code ownerIp} và {@code sha256Hash} (hỗ trợ cả tiếng Việt có dấu và không dấu).
+     */
     private static boolean matchesSearchKeyword(SharedFile file, String keyword) {
-        if (keyword.isEmpty()) {
+        if (keyword == null || keyword.isBlank()) {
             return true;
         }
-        return file.fileName().toLowerCase(Locale.ROOT).contains(keyword)
-                || file.ownerName().toLowerCase(Locale.ROOT).contains(keyword)
-                || file.ownerIp().toLowerCase(Locale.ROOT).contains(keyword)
-                || file.sha256Hash().toLowerCase(Locale.ROOT).contains(keyword);
+        String rawCorpus = (file.fileName() + " "
+                + file.aiTags() + " "
+                + file.aiSummary() + " "
+                + file.ownerName() + " "
+                + file.ownerIp() + " "
+                + file.sha256Hash()).toLowerCase(Locale.ROOT);
+
+        String lowerKeyword = keyword.toLowerCase(Locale.ROOT).trim();
+        if (rawCorpus.contains(lowerKeyword)) {
+            return true;
+        }
+
+        String normalizedCorpus = HeuristicOfflineAIService.stripVietnameseAccents(rawCorpus);
+        String normalizedQuery = HeuristicOfflineAIService.stripVietnameseAccents(lowerKeyword);
+        if (normalizedCorpus.contains(normalizedQuery)) {
+            return true;
+        }
+
+        // Tách câu truy vấn tự nhiên thành các token ngữ nghĩa và kiểm tra khớp tất cả các từ khóa chính
+        String[] tokens = normalizedQuery.split("\\s+");
+        if (tokens.length > 1) {
+            for (String token : tokens) {
+                if (token.length() >= 2 && !normalizedCorpus.contains(token)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        return false;
     }
 
     private void startDiscovery() {

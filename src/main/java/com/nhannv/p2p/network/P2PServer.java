@@ -653,7 +653,10 @@ public class P2PServer extends Task<Void> {
                                 sf.sha256Hash(),
                                 endpoint,
                                 peer.hostName(),
-                                List.of(endpoint)
+                                List.of(endpoint),
+                                sf.aiTags(),
+                                sf.aiSummary(),
+                                sf.sensitiveWarning()
                         ));
                     }
                 }

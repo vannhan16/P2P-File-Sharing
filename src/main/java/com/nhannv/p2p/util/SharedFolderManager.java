@@ -1,5 +1,7 @@
 package com.nhannv.p2p.util;
 
+import com.nhannv.p2p.ai.AIManager;
+import com.nhannv.p2p.ai.AIMetadata;
 import com.nhannv.p2p.model.SharedFile;
 import javafx.concurrent.Task;
 
@@ -357,13 +359,15 @@ public class SharedFolderManager implements AutoCloseable {
         for (File file : files) {
             try {
                 String sha256 = HashUtil.calculateSHA256(file);
-                result.add(new SharedFile(
+                AIMetadata aiMeta = AIManager.getInstance().analyzeFileWithCache(file, sha256);
+                SharedFile sharedFile = new SharedFile(
                         file.getName(),
                         file.length(),
                         sha256,
                         "LOCAL",
                         localHostName
-                ));
+                ).withAiMetadata(aiMeta);
+                result.add(sharedFile);
             } catch (IOException e) {
                 LOG.log(Level.WARNING, "Không thể băm SHA-256 cho tệp: " + file.getName(), e);
             }
@@ -400,16 +404,17 @@ public class SharedFolderManager implements AutoCloseable {
                     }
                     File f = files[i];
                     updateProgress(i, total);
-                    updateMessage("Trạng thái: Đang tính SHA-256 (" + (i + 1) + "/" + total + "): " + f.getName());
+                    updateMessage("Trạng thái: Đang băm SHA-256 & gắn thẻ AI (" + (i + 1) + "/" + total + "): " + f.getName());
                     try {
                         String sha256 = HashUtil.calculateSHA256(f);
+                        AIMetadata aiMeta = AIManager.getInstance().analyzeFileWithCache(f, sha256);
                         scanned.add(new SharedFile(
                                 f.getName(),
                                 f.length(),
                                 sha256,
                                 "LOCAL",
                                 localHostName
-                        ));
+                        ).withAiMetadata(aiMeta));
                     } catch (IOException e) {
                         LOG.log(Level.WARNING, "Bỏ qua tệp lỗi khi tính SHA-256: " + f.getName(), e);
                     }
