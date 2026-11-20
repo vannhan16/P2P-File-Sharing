@@ -46,6 +46,10 @@
             <Label fx:id="pinStatusPillLabel"
                    text="PIN: OFF"
                    styleClass="network-pill, pill-neutral"/>
+            <Button fx:id="aiProviderPillButton"
+                    text="AI: Local Heuristic"
+                    onAction="#handleConfigureAiProvider"
+                    styleClass="network-pill, pill-sync"/>
 
             <Button fx:id="firewallConfigButton"
                     text="Firewall (1-Click)"
@@ -146,6 +150,10 @@
                                        styleClass="search-input-field"
                                        HBox.hgrow="ALWAYS"/>
                         </HBox>
+                        <Button fx:id="aiPreviewFileButton"
+                                text="Tóm tắt AI (8KB)"
+                                onAction="#handleAiPreviewSelectedFile"
+                                styleClass="button-outlined"/>
                         <Button fx:id="shareFolderZipButton"
                                 text="Chia sẻ Thư mục (ZIP)"
                                 onAction="#handleShareDirectoryAsZip"
@@ -192,6 +200,11 @@
                     <VBox spacing="4" prefHeight="135" minHeight="115">
                         <HBox alignment="CENTER_LEFT" spacing="8">
                             <Label text="NHẬT KÝ SỰ KIỆN MẠNG THỜI GIAN THỰC (NETWORK TELEMETRY LOG)" styleClass="section-header"/>
+                            <Region HBox.hgrow="ALWAYS"/>
+                            <Button fx:id="aiDiagnoseNetworkButton"
+                                    text="Chẩn đoán Mạng (AI)"
+                                    onAction="#handleAiDiagnoseNetwork"
+                                    styleClass="flat"/>
                         </HBox>
                         <TextArea fx:id="networkLogArea"
                                   editable="false"

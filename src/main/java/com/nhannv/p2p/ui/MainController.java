@@ -2,7 +2,9 @@ package com.nhannv.p2p.ui;
 
 import com.nhannv.p2p.MainApplication;
 import com.nhannv.p2p.ai.AIManager;
+import com.nhannv.p2p.ai.FileContentExtractor;
 import com.nhannv.p2p.ai.HeuristicOfflineAIService;
+import com.nhannv.p2p.ai.NetworkDiagnosticContext;
 import com.nhannv.p2p.model.Peer;
 import com.nhannv.p2p.model.SharedFile;
 import com.nhannv.p2p.model.TransferHistoryItem;
@@ -43,6 +45,7 @@ import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
+import javafx.scene.control.TextInputDialog;
 import javafx.scene.control.Tooltip;
 import javafx.scene.input.Clipboard;
 import javafx.scene.input.ClipboardContent;
@@ -112,6 +115,9 @@ public class MainController implements PeerDiscoveryListener {
     private Label pinStatusPillLabel;
 
     @FXML
+    private Button aiProviderPillButton;
+
+    @FXML
     private Button firewallConfigButton;
 
     @FXML
@@ -159,6 +165,9 @@ public class MainController implements PeerDiscoveryListener {
     private TextField searchTextField;
 
     @FXML
+    private Button aiPreviewFileButton;
+
+    @FXML
     private Button shareFolderZipButton;
 
     @FXML
@@ -187,6 +196,9 @@ public class MainController implements PeerDiscoveryListener {
 
     @FXML
     private HBox chunkMatrixContainer;
+
+    @FXML
+    private Button aiDiagnoseNetworkButton;
 
     @FXML
     private TextArea networkLogArea;
@@ -351,7 +363,9 @@ public class MainController implements PeerDiscoveryListener {
 
         updateSharedFolderLabel();
         refreshHeaderIpBadges();
-        appendNetworkLog("Khởi tạo P2P File Sharing — Crafted Desktop UI & Milestone 6 Enterprise...");
+        refreshAiProviderPill();
+        appendNetworkLog("Khởi tạo P2P File Sharing — Crafted Desktop UI & AI-Augmented P2P ("
+                + AIManager.getInstance().getActiveProviderBadgeText() + ")...");
         appendChatLog("Hệ thống", "Kênh Chat P2P bảo mật đầu-cuối (AES-256-GCM) đã sẵn sàng.");
         logDetectedPhysicalSubnets();
         checkFirewallStatusAsync();
@@ -397,6 +411,10 @@ public class MainController implements PeerDiscoveryListener {
             pinStatusPillLabel.setGraphic(icon(Feather.LOCK, 12, "#8B949E"));
             pinStatusPillLabel.setGraphicTextGap(5);
         }
+        if (aiProviderPillButton != null) {
+            aiProviderPillButton.setGraphic(icon(Feather.CPU, 12, "#3B82F6"));
+            aiProviderPillButton.setGraphicTextGap(5);
+        }
         if (firewallConfigButton != null) {
             firewallConfigButton.setGraphic(icon(Feather.SHIELD, 13, "#F59E0B"));
         }
@@ -415,6 +433,9 @@ public class MainController implements PeerDiscoveryListener {
         if (searchIconHolder != null) {
             searchIconHolder.setGraphic(icon(Feather.SEARCH, 14, "#8B949E"));
         }
+        if (aiPreviewFileButton != null) {
+            aiPreviewFileButton.setGraphic(icon(Feather.ZAP, 13, "#3B82F6"));
+        }
         if (shareFolderZipButton != null) {
             shareFolderZipButton.setGraphic(icon(Feather.ARCHIVE, 13, "#3B82F6"));
         }
@@ -423,6 +444,9 @@ public class MainController implements PeerDiscoveryListener {
         }
         if (refreshFilesButton != null) {
             refreshFilesButton.setGraphic(icon(Feather.REFRESH_CW, 13, "#8B949E"));
+        }
+        if (aiDiagnoseNetworkButton != null) {
+            aiDiagnoseNetworkButton.setGraphic(icon(Feather.ACTIVITY, 13, "#3B82F6"));
         }
         if (exportCsvButton != null) {
             exportCsvButton.setGraphic(icon(Feather.DOWNLOAD, 13, "#FFFFFF"));
@@ -1704,12 +1728,260 @@ public class MainController implements PeerDiscoveryListener {
             speedChartTimeline.stop();
         }
         sharedFolderManager.stopWatcher();
+        AIManager.getInstance().shutdown();
         if (discoveryService != null) {
             discoveryService.stop();
         }
         if (p2pServer != null) {
             p2pServer.stopServer();
         }
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // PHASE 3: PRE-DOWNLOAD 8KB AI PREVIEW, AI NETWORK DIAGNOSTICS & PROVIDER CONFIG
+    // ------------------------------------------------------------------------------------------
+
+    private void refreshAiProviderPill() {
+        if (aiProviderPillButton == null) {
+            return;
+        }
+        String badgeText = AIManager.getInstance().getActiveProviderBadgeText();
+        aiProviderPillButton.setText(badgeText);
+        boolean cloudActive = AIManager.getInstance().getGeminiService().isAvailable();
+        aiProviderPillButton.getStyleClass().setAll("network-pill", cloudActive ? "pill-online" : "pill-sync");
+        aiProviderPillButton.setGraphic(icon(Feather.CPU, 12, cloudActive ? "#10B981" : "#3B82F6"));
+    }
+
+    /**
+     * Cho phép người dùng bấm vào Pill {@code AI: ...} trên thanh Header để cấu hình nhanh
+     * {@code GEMINI_API_KEY} (hoặc để trống để chạy 100% Offline qua Ollama / Local Heuristic).
+     */
+    @FXML
+    private void handleConfigureAiProvider() {
+        String currentKey = AIManager.getInstance().getGeminiService().getApiKey();
+        TextInputDialog dialog = new TextInputDialog(currentKey);
+        dialog.setTitle("Cấu hình Động cơ Trí tuệ Nhân tạo (AI Strategy Config)");
+        dialog.setHeaderText("Đang hoạt động: " + AIManager.getInstance().getActiveProviderBadgeText()
+                + " | Cache SHA-256: " + AIManager.getInstance().getCacheStore().size() + " tệp");
+        dialog.setContentText("Nhập Gemini API Key (để trống nếu muốn dùng Ollama Local / Offline Heuristic):");
+
+        Optional<String> result = dialog.showAndWait();
+        if (result.isPresent()) {
+            String newKey = result.get().trim();
+            AIManager.getInstance().configureGeminiApiKey(newKey);
+            refreshAiProviderPill();
+            String activeMode = AIManager.getInstance().getActiveProviderBadgeText();
+            appendNetworkLog("Đã cập nhật chiến lược AI -> " + activeMode);
+            setStatus("Đã chuyển chế độ AI sang: " + activeMode);
+        }
+    }
+
+    /**
+     * Tính năng 2 (Phase 3): <b>Tóm tắt tệp trước khi tải chỉ với 8 KB (Pre-download AI Preview)</b>.
+     * Chỉ tải đúng 8 KB đầu tiên từ Peer qua lệnh {@code DOWNLOAD_CHUNK} ({@code offset=0, length=8192})
+     * để trích xuất nội dung và phân tích bằng AI, tiết kiệm 99,99% băng thông trước khi tải file nặng.
+     */
+    @FXML
+    private void handleAiPreviewSelectedFile() {
+        SharedFile selectedFile = sharedFileTable.getSelectionModel().getSelectedItem();
+        if (selectedFile == null) {
+            Alert alert = new Alert(Alert.AlertType.WARNING);
+            alert.setTitle("Chưa chọn tệp để xem trước");
+            alert.setHeaderText("Vui lòng chọn một tệp trong bảng danh sách ở giữa!");
+            alert.setContentText("Hãy bấm chọn một tệp trước khi bấm \"Tóm tắt AI (8KB)\".");
+            alert.showAndWait();
+            return;
+        }
+
+        if (aiPreviewFileButton != null) {
+            aiPreviewFileButton.setDisable(true);
+        }
+        String targetEndpoint = selectedFile.resolvedTargetIps().get(0);
+        appendNetworkLog("[AI PREVIEW 8KB] Đang trích xuất 8 KB đầu tiên của \""
+                + selectedFile.fileName() + "\" từ " + (selectedFile.isLocal() ? "máy cục bộ" : targetEndpoint) + "...");
+
+        Task<String> previewTask = new Task<>() {
+            @Override
+            protected String call() throws Exception {
+                updateProgress(-1, 1);
+                updateMessage("Trạng thái: Đang lấy 8 KB đầu tiên của \"" + selectedFile.fileName() + "\" để tóm tắt AI...");
+
+                String snippet;
+                if (selectedFile.isLocal()) {
+                    File localFile = sharedFolderManager.resolveSharedFileOnDisk(selectedFile.fileName());
+                    snippet = FileContentExtractor.extractSnippet(localFile);
+                } else {
+                    snippet = P2PServer.requestPreviewSnippetFromPeer(
+                            targetEndpoint,
+                            selectedFile.fileName(),
+                            getPeerAuthPinInput(),
+                            8 * 1024
+                    );
+                }
+
+                String aiReport = AIManager.getInstance().generatePreDownloadPreviewAsync(
+                        selectedFile.fileName(),
+                        selectedFile.fileSize(),
+                        selectedFile.aiTags(),
+                        snippet
+                ).get(10, TimeUnit.SECONDS);
+
+                updateProgress(1.0, 1.0);
+                updateMessage("Trạng thái: Đã hoàn tất tóm tắt AI (8KB Preview) cho \"" + selectedFile.fileName() + "\"");
+                return aiReport;
+            }
+        };
+
+        previewTask.setOnSucceeded(e -> {
+            if (aiPreviewFileButton != null) {
+                aiPreviewFileButton.setDisable(false);
+            }
+            String report = previewTask.getValue();
+            appendNetworkLog("[AI PREVIEW 8KB] Hoàn tất phân tích trước khi tải cho \"" + selectedFile.fileName() + "\".");
+
+            Alert dialog = new Alert(Alert.AlertType.CONFIRMATION);
+            dialog.setTitle("Tóm tắt Tệp Trước Khi Tải — Pre-download 8KB AI Preview");
+            dialog.setHeaderText(selectedFile.fileName() + " (" + selectedFile.formattedSize()
+                    + ") — Nguồn: " + selectedFile.ownerDisplay());
+
+            TextArea reportArea = new TextArea(report);
+            reportArea.setEditable(false);
+            reportArea.setWrapText(true);
+            reportArea.setPrefWidth(620);
+            reportArea.setPrefHeight(290);
+            reportArea.getStyleClass().add("telemetry-log-area");
+            dialog.getDialogPane().setContent(reportArea);
+
+            ButtonType downloadNowBtn = new ButtonType("Tải toàn bộ tệp ngay");
+            ButtonType closeBtn = new ButtonType("Đóng");
+            dialog.getButtonTypes().setAll(downloadNowBtn, closeBtn);
+
+            Optional<ButtonType> choice = dialog.showAndWait();
+            if (choice.isPresent() && choice.get() == downloadNowBtn) {
+                handleDownloadSelectedFile();
+            }
+        });
+
+        previewTask.setOnFailed(e -> {
+            if (aiPreviewFileButton != null) {
+                aiPreviewFileButton.setDisable(false);
+            }
+            Throwable ex = previewTask.getException();
+            String err = (ex != null && ex.getMessage() != null) ? ex.getMessage() : "Không lấy được chunk 8KB";
+            appendNetworkLog("[AI PREVIEW LỖI] " + err);
+            setStatus("Lỗi xem trước 8KB: " + err);
+        });
+
+        bindUiToTask(previewTask);
+        Thread t = new Thread(previewTask, "p2p-ai-8kb-preview-worker");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /**
+     * Tính năng 3 (Phase 3): <b>Chẩn đoán Lỗi Mạng &amp; Tối ưu Băng thông Thông minh (AI Network Diagnostics)</b>.
+     * Đọc trực tiếp log lỗi thực tế, trạng thái Firewall, danh sách Subnet, độ trễ Ping RTT và cấu hình QoS
+     * để giải thích nguyên nhân gốc rễ và đề xuất cách khắc phục bằng tiếng Việt.
+     */
+    @FXML
+    private void handleAiDiagnoseNetwork() {
+        if (aiDiagnoseNetworkButton != null) {
+            aiDiagnoseNetworkButton.setDisable(true);
+        }
+
+        String rawLogs = (networkLogArea != null && networkLogArea.getText() != null)
+                ? networkLogArea.getText()
+                : "";
+        String[] allLines = rawLogs.split("\r?\n");
+        int startLine = Math.max(0, allLines.length - 25);
+        StringBuilder recentLogs = new StringBuilder();
+        for (int i = startLine; i < allLines.length; i++) {
+            recentLogs.append(allLines[i]).append("\n");
+        }
+
+        StringBuilder peerLatencySummary = new StringBuilder();
+        for (Peer p : peerList) {
+            if (!peerLatencySummary.isEmpty()) {
+                peerLatencySummary.append(", ");
+            }
+            peerLatencySummary.append(p.hostName()).append("@").append(p.endpoint())
+                    .append("[RTT=").append(p.latencyMs() >= 0 ? (p.latencyMs() + "ms") : "N/A").append("]");
+        }
+
+        StringBuilder historySummary = new StringBuilder();
+        int histLimit = Math.min(5, historyList.size());
+        for (int i = 0; i < histLimit; i++) {
+            TransferHistoryItem item = historyList.get(i);
+            historySummary.append(item.fileName()).append(" (").append(item.formattedSpeed())
+                    .append(", ").append(item.sha256Status()).append("); ");
+        }
+
+        int peersCountSnapshot = peerList.size();
+        long qosBytesPerSec = BandwidthLimiter.getInstance().getMaxBytesPerSecond();
+
+        Task<String> diagTask = new Task<>() {
+            @Override
+            protected String call() throws Exception {
+                updateProgress(-1, 1);
+                updateMessage("Trạng thái: Đang thu thập thông số Firewall, RTT, QoS và phân tích log mạng bằng AI...");
+
+                boolean fwOk = FirewallUtil.isFirewallRuleConfigured();
+                List<DiscoveryService.LanSubnetTarget> subnets = DiscoveryService.collectPhysicalLanSubnets();
+                StringBuilder subnetStr = new StringBuilder();
+                for (DiscoveryService.LanSubnetTarget s : subnets) {
+                    subnetStr.append(s.interfaceName()).append("(").append(s.localAddress().getHostAddress()).append(") ");
+                }
+
+                NetworkDiagnosticContext ctx = new NetworkDiagnosticContext(
+                        recentLogs.toString(),
+                        subnetStr.toString().trim(),
+                        fwOk,
+                        peersCountSnapshot,
+                        peerLatencySummary.toString(),
+                        qosBytesPerSec,
+                        historySummary.toString()
+                );
+
+                String diagnosis = AIManager.getInstance().diagnoseNetworkIssueAsync(ctx).get(10, TimeUnit.SECONDS);
+                updateProgress(1.0, 1.0);
+                updateMessage("Trạng thái: Hoàn tất chẩn đoán mạng thông minh (AI Network Diagnostics).");
+                return diagnosis;
+            }
+        };
+
+        diagTask.setOnSucceeded(e -> {
+            if (aiDiagnoseNetworkButton != null) {
+                aiDiagnoseNetworkButton.setDisable(false);
+            }
+            String report = diagTask.getValue();
+            appendNetworkLog("\n" + report);
+
+            Alert dialog = new Alert(Alert.AlertType.INFORMATION);
+            dialog.setTitle("Báo cáo Chẩn đoán Mạng & Tối ưu Băng thông (AI Network Diagnostics)");
+            dialog.setHeaderText("Phân tích tự động từ Telemetry Log, Windows Firewall & Ping RTT ("
+                    + AIManager.getInstance().getActiveProviderBadgeText() + ")");
+
+            TextArea area = new TextArea(report);
+            area.setEditable(false);
+            area.setWrapText(true);
+            area.setPrefWidth(620);
+            area.setPrefHeight(280);
+            area.getStyleClass().add("telemetry-log-area");
+            dialog.getDialogPane().setContent(area);
+            dialog.showAndWait();
+        });
+
+        diagTask.setOnFailed(e -> {
+            if (aiDiagnoseNetworkButton != null) {
+                aiDiagnoseNetworkButton.setDisable(false);
+            }
+            setStatus("Lỗi khi chạy chẩn đoán mạng AI.");
+        });
+
+        bindUiToTask(diagTask);
+        Thread t = new Thread(diagTask, "p2p-ai-network-diagnostics");
+        t.setDaemon(true);
+        t.start();
     }
 
     @Override

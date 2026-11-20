@@ -1,5 +1,6 @@
 package com.nhannv.p2p.network;
 
+import com.nhannv.p2p.ai.FileContentExtractor;
 import com.nhannv.p2p.model.Peer;
 import com.nhannv.p2p.model.SharedFile;
 import com.nhannv.p2p.model.TransferHistoryItem;
@@ -661,6 +662,65 @@ public class P2PServer extends Task<Void> {
                     }
                 }
                 return files;
+            }
+        }
+    }
+
+    /**
+     * Tải nhanh đúng {@code maxPreviewBytes} đầu tiên (mặc định 8 KB) của tệp trên Peer từ xa
+     * qua lệnh {@code DOWNLOAD_CHUNK} ({@code offset = 0, length = 8192}) để trích xuất văn bản
+     * phục vụ tính năng <b>Pre-download AI Preview</b> (tiết kiệm 99,99% băng thông).
+     */
+    public static String requestPreviewSnippetFromPeer(
+            String targetEndpoint,
+            String fileName,
+            String authPin,
+            int maxPreviewBytes
+    ) throws IOException {
+        Peer.HostPort hp = Peer.parseHostPort(targetEndpoint, DEFAULT_PORT);
+        String safeFileName = Path.of(fileName).getFileName().toString();
+        String pin = (authPin == null) ? "" : authPin.trim();
+        int bytesToRequest = Math.max(1024, Math.min(maxPreviewBytes, 32 * 1024));
+
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(hp.host(), hp.port()), LIST_CONNECT_TIMEOUT_MS);
+            socket.setSoTimeout(SOCKET_TIMEOUT_MS);
+            socket.setTcpNoDelay(true);
+
+            try (DataOutputStream dos = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream()));
+                 DataInputStream dis = new DataInputStream(new BufferedInputStream(socket.getInputStream()))) {
+
+                dos.writeUTF(CMD_DOWNLOAD_CHUNK);
+                dos.writeUTF(safeFileName);
+                dos.writeLong(0L);
+                dos.writeLong(bytesToRequest);
+                dos.writeUTF(pin);
+                dos.flush();
+
+                long remoteTotalSize = dis.readLong();
+                if (remoteTotalSize == CODE_AUTH_FAILED) {
+                    String status = dis.readUTF();
+                    throw new IOException("Peer " + hp.toEndpointString()
+                            + " từ chối yêu cầu xem trước (" + status + " - Sai mã PIN bảo mật)!");
+                }
+                if (remoteTotalSize < 0) {
+                    throw new IOException("Tệp \"" + safeFileName + "\" không còn tồn tại trên Peer " + hp.toEndpointString());
+                }
+
+                long actualChunkLen = dis.readLong();
+                dis.readUTF(); // Bỏ qua header SHA-256
+
+                int lenToRead = (int) Math.min(actualChunkLen, bytesToRequest);
+                byte[] previewBuffer = new byte[lenToRead];
+                int offset = 0;
+                while (offset < lenToRead) {
+                    int read = dis.read(previewBuffer, offset, lenToRead - offset);
+                    if (read == -1) {
+                        break;
+                    }
+                    offset += read;
+                }
+                return FileContentExtractor.extractSnippetFromBytes(safeFileName, previewBuffer, offset);
             }
         }
     }
