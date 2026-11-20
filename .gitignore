@@ -7,6 +7,8 @@ Downloads/*
 Shared/*
 !Shared/.gitkeep
 *.part
+.p2p-ai-cache.properties
+.p2p-ai-config.properties
 
 # Maven wrapper
 !.mvn/wrapper/maven-wrapper.jar
