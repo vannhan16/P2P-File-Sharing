@@ -1,5 +1,6 @@
 package com.nhannv.p2p.model;
 
+import java.util.Locale;
 import java.util.Objects;
 
 /**
@@ -157,6 +158,20 @@ public record Peer(
         return other != null
                 && ipAddress.equalsIgnoreCase(other.ipAddress)
                 && tcpPort == other.tcpPort;
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+        if (this == obj) return true;
+        if (obj instanceof Peer other) {
+            return isSamePeer(other);
+        }
+        return false;
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(ipAddress.toLowerCase(Locale.ROOT), tcpPort);
     }
 
     /** Hiển thị trên ListView, vd: "[PIN] DESKTOP-NHAN - 192.168.1.15 (2 ms)". */

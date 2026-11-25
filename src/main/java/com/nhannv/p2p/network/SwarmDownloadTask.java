@@ -5,6 +5,8 @@ import com.nhannv.p2p.model.SharedFile;
 import com.nhannv.p2p.model.TransferHistoryItem;
 import com.nhannv.p2p.util.BandwidthLimiter;
 import com.nhannv.p2p.util.HashUtil;
+import com.nhannv.p2p.util.PathUtil;
+import com.nhannv.p2p.util.TransferUtil;
 import javafx.concurrent.Task;
 
 import java.io.BufferedInputStream;
@@ -19,17 +21,17 @@ import java.net.Socket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
@@ -39,22 +41,26 @@ import java.util.logging.Logger;
 
 /**
  * Tác vụ tải tệp Đa Nguồn Song Song (<b>Multi-source / Swarm Download</b>),
- * nâng cấp ở Milestone 6 với:
+ * nâng cấp toàn diện theo mô hình Dynamic Block Queue (Milestone 6 &amp; P2-3):
  * <ul>
- *   <li><b>BitTorrent 32-Chunk Matrix UI:</b> Cập nhật màu sắc trực tiếp của 32 mảnh ghép theo từng Peer.</li>
- *   <li><b>Tự động chuyển nguồn dự phòng (Dynamic Failover):</b> Nếu 1 Peer bị rớt mạng giữa chừng,
- *       tác vụ tự động chuyển phần byte còn thiếu của phân đoạn đó sang các Peer còn sống để tải tiếp!</li>
- *   <li><b>Điều tiết băng thông (Token Bucket QoS):</b> Tích hợp {@link BandwidthLimiter}.</li>
+ *   <li><b>Hàng đợi khối dùng chung (Dynamic Block Queue P2-3):</b> Tệp được chia thành các block 1 MB.
+ *       Mỗi worker lấy block tiếp theo từ hàng đợi chung; peer nhanh tải nhiều block hơn, peer chậm không kéo lùi tiến độ.</li>
+ *   <li><b>Chuyển nguồn tự nhiên (Dynamic Failover B2, P2-3):</b> Nếu kết nối tới một Peer bị ngắt,
+ *       block đó lập tức được đẩy lại vào hàng đợi để Peer khác tải thay thế.</li>
+ *   <li><b>Kiểm tra tính toàn vẹn từng phân đoạn (B2):</b> Xác thực chặt chẽ {@code actualChunkLen == remainingInBlock}
+ *       và {@code remoteTotalSize == totalSize}.</li>
+ *   <li><b>Đồng bộ Sidecar .part.meta (B1):</b> Cùng chia sẻ một cấu trúc metadata với {@link ResumableDownloadTask}.</li>
+ *   <li><b>Xác thực Challenge-Response HMAC (S1):</b> Không gửi mã PIN qua mạng.</li>
  * </ul>
  */
-public class SwarmDownloadTask extends Task<Boolean> {
+public class SwarmDownloadTask extends Task<DownloadResult> {
 
     private static final Logger LOG = Logger.getLogger(SwarmDownloadTask.class.getName());
-    private static final DateTimeFormatter HISTORY_TIME_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     private static final int CHUNK_BUFFER_SIZE = 64 * 1024;
     private static final int CONNECT_TIMEOUT_MS = 5_000;
     private static final int READ_TIMEOUT_MS = 15_000;
+    private static final long UI_THROTTLE_MS = 60L;
 
     private final SharedFile targetFile;
     private final List<String> peerEndpoints;
@@ -65,38 +71,16 @@ public class SwarmDownloadTask extends Task<Boolean> {
     private final Consumer<TransferHistoryItem> historyCallback;
     private final DownloadManager.ChunkMatrixCallback chunkMatrixCallback;
 
-    private final long[] partProgressBytes;
-
     private volatile boolean isPaused = false;
     private volatile boolean isCanceledByUser = false;
     private volatile ExecutorService swarmExecutor;
 
-    public SwarmDownloadTask(
-            SharedFile targetFile,
-            List<String> peerEndpoints,
-            long[] existingPartProgress,
-            Consumer<String> eventLogger
-    ) {
-        this(targetFile, peerEndpoints, "", existingPartProgress, eventLogger, null, null, null);
-    }
+    private long lastUiUpdateMillis = 0L;
 
     public SwarmDownloadTask(
             SharedFile targetFile,
             List<String> peerEndpoints,
             String authPin,
-            long[] existingPartProgress,
-            Consumer<String> eventLogger,
-            DoubleConsumer speedSampleCallback,
-            Consumer<TransferHistoryItem> historyCallback
-    ) {
-        this(targetFile, peerEndpoints, authPin, existingPartProgress, eventLogger, speedSampleCallback, historyCallback, null);
-    }
-
-    public SwarmDownloadTask(
-            SharedFile targetFile,
-            List<String> peerEndpoints,
-            String authPin,
-            long[] existingPartProgress,
             Consumer<String> eventLogger,
             DoubleConsumer speedSampleCallback,
             Consumer<TransferHistoryItem> historyCallback,
@@ -113,16 +97,6 @@ public class SwarmDownloadTask extends Task<Boolean> {
         this.speedSampleCallback = speedSampleCallback;
         this.historyCallback = historyCallback;
         this.chunkMatrixCallback = chunkMatrixCallback;
-
-        if (existingPartProgress != null && existingPartProgress.length == this.peerEndpoints.size()) {
-            this.partProgressBytes = existingPartProgress.clone();
-        } else {
-            this.partProgressBytes = new long[this.peerEndpoints.size()];
-        }
-    }
-
-    public synchronized long[] getPartProgressSnapshot() {
-        return partProgressBytes.clone();
     }
 
     public void pauseDownload() {
@@ -144,14 +118,20 @@ public class SwarmDownloadTask extends Task<Boolean> {
     }
 
     public Path getPartFilePath() {
-        String safeFileName = Path.of(targetFile.fileName()).getFileName().toString();
+        String safeFileName = PathUtil.sanitizeFileName(targetFile.fileName());
         return downloadDirectory.resolve(safeFileName + ".part");
     }
 
+    public Path getPartMetaFilePath() {
+        String safeFileName = PathUtil.sanitizeFileName(targetFile.fileName());
+        return downloadDirectory.resolve(safeFileName + ".part.meta");
+    }
+
     @Override
-    protected Boolean call() {
-        String safeFileName = Path.of(targetFile.fileName()).getFileName().toString();
+    protected DownloadResult call() {
+        String safeFileName = PathUtil.sanitizeFileName(targetFile.fileName());
         File partFile = getPartFilePath().toFile();
+        Path metaPath = getPartMetaFilePath();
         long totalSize = targetFile.fileSize();
         int peerCount = peerEndpoints.size();
         String peersSummary = peerCount + " Peers " + peerEndpoints;
@@ -159,24 +139,30 @@ public class SwarmDownloadTask extends Task<Boolean> {
         try {
             Files.createDirectories(downloadDirectory);
 
+            // [B1 Fix]: Tải hoặc tạo Sidecar Metadata
+            DownloadPartMeta meta = DownloadPartMeta.loadOrCreate(metaPath, targetFile.sha256Hash(), totalSize);
+
+            // Cấp phát trước kích thước tệp .part nếu chưa đủ
             try (RandomAccessFile preAllocRaf = new RandomAccessFile(partFile, "rw")) {
                 if (preAllocRaf.length() != totalSize) {
                     preAllocRaf.setLength(totalSize);
                 }
             }
 
-            long alreadyDownloaded = 0L;
-            for (long done : partProgressBytes) {
-                alreadyDownloaded += done;
-            }
-
+            long alreadyDownloaded = meta.getDownloadedBytes();
             final AtomicLong totalBytesDownloaded = new AtomicLong(alreadyDownloaded);
             final AtomicLong sessionBytesDownloaded = new AtomicLong(0L);
             final long startNano = System.nanoTime();
 
+            // Khởi tạo trạng thái mảnh đã có sẵn lên BitTorrent Matrix
+            updateOverallChunkMatrix(alreadyDownloaded, Math.max(totalSize, 1L));
+
             logEvent(String.format(Locale.US,
-                    "Bắt đầu tải đa nguồn (Swarm) \"%s\" (%s) từ %d nguồn: %s...",
+                    "Bắt đầu tải Swarm Block-Queue \"%s\" (%s) từ %d nguồn: %s...",
                     safeFileName, targetFile.formattedSize(), peerCount, peerEndpoints));
+
+            // [P2-3 Fix]: Tạo hàng đợi khối dùng chung
+            ConcurrentLinkedQueue<Integer> blockQueue = new ConcurrentLinkedQueue<>(meta.getIncompleteBlocks());
 
             AtomicInteger workerIdx = new AtomicInteger(1);
             ExecutorService executor = Executors.newFixedThreadPool(peerCount, r -> {
@@ -186,67 +172,69 @@ public class SwarmDownloadTask extends Task<Boolean> {
             });
             this.swarmExecutor = executor;
 
-            long basePartSize = totalSize / peerCount;
-            List<Callable<Boolean>> partTasks = new ArrayList<>(peerCount);
+            List<Callable<Boolean>> workers = new ArrayList<>(peerCount);
+            AtomicBoolean anyFatalAuthError = new AtomicBoolean(false);
 
             for (int i = 0; i < peerCount; i++) {
-                final int partIndex = i;
-                final String primaryPeerEndpoint = peerEndpoints.get(i);
-                final long partStartOffset = i * basePartSize;
-                final long partTotalLength = (i == peerCount - 1)
-                        ? (totalSize - partStartOffset)
-                        : basePartSize;
+                final int peerIndex = i;
+                final String initialPeerEndpoint = peerEndpoints.get(i);
 
-                partTasks.add(() -> downloadPartWithFailover(
-                        partIndex,
-                        primaryPeerEndpoint,
+                workers.add(() -> runSwarmWorker(
+                        peerIndex,
+                        initialPeerEndpoint,
                         safeFileName,
                         partFile,
-                        partStartOffset,
-                        partTotalLength,
+                        meta,
+                        blockQueue,
                         totalSize,
                         peerCount,
                         totalBytesDownloaded,
                         sessionBytesDownloaded,
-                        startNano
+                        startNano,
+                        anyFatalAuthError
                 ));
             }
 
-            List<Future<Boolean>> futures = executor.invokeAll(partTasks);
+            List<Future<Boolean>> futures = executor.invokeAll(workers);
             executor.shutdown();
-            executor.awaitTermination(5, TimeUnit.SECONDS);
+            executor.awaitTermination(3, TimeUnit.SECONDS);
             reportSpeed(0.0);
+            meta.save();
 
             if (isPaused) {
                 long currentDone = totalBytesDownloaded.get();
                 double pct = totalSize > 0 ? (currentDone * 100.0) / totalSize : 0.0;
                 String pauseMsg = String.format(Locale.US,
-                        "Tạm dừng tải đa nguồn tại %.1f%% (%s / %s) - offset tổng=%d",
-                        pct, SharedFile.formatSize(currentDone), SharedFile.formatSize(totalSize), currentDone);
+                        "Tạm dừng tải đa nguồn tại %.1f%% (%s / %s)",
+                        pct, SharedFile.formatSize(currentDone), SharedFile.formatSize(totalSize));
                 updateMessage("Trạng thái: " + pauseMsg);
                 logEvent(pauseMsg);
-                return false;
+                return DownloadResult.PAUSED;
             }
 
             if (isCanceledByUser || isCancelled()) {
                 Files.deleteIfExists(partFile.toPath());
+                meta.delete();
                 updateProgress(0.0, 1.0);
                 updateMessage("Trạng thái: Đã hủy tải đa nguồn và xóa tệp tạm " + partFile.getName());
                 logEvent("Đã hủy tải đa nguồn \"" + safeFileName + "\" và xóa file .part.");
-                return false;
+                return DownloadResult.CANCELLED;
             }
 
-            for (Future<Boolean> future : futures) {
-                if (!Boolean.TRUE.equals(future.get())) {
-                    long currentDone = totalBytesDownloaded.get();
-                    double pct = totalSize > 0 ? (currentDone * 100.0) / totalSize : 0.0;
-                    String msg = String.format(Locale.US,
-                            "Tải đa nguồn bị gián đoạn tại %.1f%%. Bấm 'Tiếp tục (Resume)' để tải tiếp phần còn thiếu!",
-                            pct);
-                    updateMessage("Trạng thái: " + msg);
-                    logEvent(msg);
-                    return false;
-                }
+            if (anyFatalAuthError.get()) {
+                return DownloadResult.AUTH_FAILED;
+            }
+
+            // Nếu hàng đợi chưa hết (các peer đều bị ngắt kết nối giữa chừng)
+            if (!meta.isAllCompleted()) {
+                long currentDone = totalBytesDownloaded.get();
+                double pct = totalSize > 0 ? (currentDone * 100.0) / totalSize : 0.0;
+                String msg = String.format(Locale.US,
+                        "Tải đa nguồn bị gián đoạn tại %.1f%%. Bấm 'Tiếp tục (Resume)' để tải tiếp phần còn thiếu!",
+                        pct);
+                updateMessage("Trạng thái: " + msg);
+                logEvent(msg);
+                return DownloadResult.PAUSED;
             }
 
             markAllChunksCompleted();
@@ -254,21 +242,23 @@ public class SwarmDownloadTask extends Task<Boolean> {
             String actualSha256 = HashUtil.calculateSHA256(partFile);
             String expectedSha256 = targetFile.sha256Hash();
             long durationMs = Math.max(1L, (System.nanoTime() - startNano) / 1_000_000L);
-            double avgSpeed = calculateSpeedMBps(Math.max(sessionBytesDownloaded.get(), totalSize), startNano);
+            double avgSpeed = TransferUtil.calculateSpeedMBps(Math.max(sessionBytesDownloaded.get(), totalSize), startNano);
 
             if (expectedSha256 != null && !expectedSha256.isBlank()
                     && !actualSha256.equalsIgnoreCase(expectedSha256)) {
                 Files.deleteIfExists(partFile.toPath());
+                meta.delete();
                 updateProgress(0.0, 1.0);
                 String err = "Cảnh báo: File đa nguồn bị hỏng (Sai lệch SHA-256)!";
                 updateMessage(err);
                 logEvent(err);
-                recordHistory(safeFileName, totalSize, peersSummary, avgSpeed, durationMs, "Lỗi SHA-256");
-                return false;
+                TransferUtil.recordHistory(historyCallback, safeFileName, totalSize, peersSummary, "Nhận (Swarm)", avgSpeed, durationMs, "Lỗi SHA-256");
+                return DownloadResult.FAILED;
             }
 
-            File finalFile = P2PServer.resolveOutputFile(downloadDirectory, safeFileName);
+            File finalFile = PathUtil.resolveSafeOutputFile(downloadDirectory, safeFileName);
             Files.move(partFile.toPath(), finalFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            meta.delete();
 
             updateProgress(1.0, 1.0);
             String okMsg = String.format(Locale.US,
@@ -276,9 +266,9 @@ public class SwarmDownloadTask extends Task<Boolean> {
                     peerCount, avgSpeed, HashUtil.shortHash(actualSha256), finalFile.getName());
             updateMessage(okMsg);
             logEvent(okMsg);
-            recordHistory(finalFile.getName(), totalSize, peersSummary, avgSpeed, durationMs,
+            TransferUtil.recordHistory(historyCallback, finalFile.getName(), totalSize, peersSummary, "Nhận (Swarm)", avgSpeed, durationMs,
                     "Hợp lệ [" + HashUtil.shortHash(actualSha256) + "]");
-            return true;
+            return DownloadResult.COMPLETED;
 
         } catch (Exception e) {
             reportSpeed(0.0);
@@ -287,118 +277,102 @@ public class SwarmDownloadTask extends Task<Boolean> {
                     Files.deleteIfExists(partFile.toPath());
                 } catch (IOException ignored) {
                 }
-                return false;
+                return DownloadResult.CANCELLED;
             }
             LOG.log(Level.WARNING, "Lỗi trong SwarmDownloadTask: " + safeFileName, e);
             updateMessage("Trạng thái: Lỗi tải đa nguồn - " + e.getMessage());
             logEvent("Lỗi tải đa nguồn \"" + safeFileName + "\": " + e.getMessage());
-            return false;
+            return DownloadResult.FAILED;
         }
     }
 
     /**
-     * Tải một phân đoạn (Part) với cơ chế <b>Tự động chuyển nguồn (Failover)</b>:
-     * Nếu Peer chính bị ngắt kết nối giữa chừng, tự động thử các Peer còn lại trong danh sách Swarm
-     * để hoàn tất phần byte còn thiếu của phân đoạn này.
+     * Mỗi worker xử lý liên tục các block lấy từ {@code blockQueue} cho đến khi rỗng.
      */
-    private Boolean downloadPartWithFailover(
-            int partIndex,
-            String primaryPeerEndpoint,
+    private Boolean runSwarmWorker(
+            int workerIndex,
+            String assignedPeer,
             String safeFileName,
             File partFile,
-            long partStartOffset,
-            long partTotalLength,
+            DownloadPartMeta meta,
+            ConcurrentLinkedQueue<Integer> blockQueue,
             long totalFileSize,
             int peerCount,
             AtomicLong totalBytesDownloaded,
             AtomicLong sessionBytesDownloaded,
-            long startNano
+            long startNano,
+            AtomicBoolean fatalAuthError
     ) {
-        if (downloadSinglePart(
-                partIndex,
-                primaryPeerEndpoint,
-                safeFileName,
-                partFile,
-                partStartOffset,
-                partTotalLength,
-                totalFileSize,
-                peerCount,
-                totalBytesDownloaded,
-                sessionBytesDownloaded,
-                startNano
-        )) {
-            return true;
-        }
+        String currentPeer = assignedPeer;
+        int activeState = (workerIndex % 2 == 0)
+                ? DownloadManager.CHUNK_STATE_ACTIVE_PRIMARY
+                : DownloadManager.CHUNK_STATE_ACTIVE_SWARM;
 
-        if (isPaused || isCanceledByUser || isCancelled()) {
-            updatePartChunkMatrix(partIndex, peerCount, 0, partTotalLength, DownloadManager.CHUNK_STATE_PAUSED_OR_RETRY);
-            return false;
-        }
-
-        // Failover: Thử tải tiếp phần còn thiếu của Part này từ các Peer khác trong Swarm
-        for (String backupEndpoint : peerEndpoints) {
-            if (backupEndpoint.equalsIgnoreCase(primaryPeerEndpoint)) {
-                continue;
+        while (!isPaused && !isCanceledByUser && !isCancelled() && !blockQueue.isEmpty()) {
+            Integer blockIdx = blockQueue.poll();
+            if (blockIdx == null) {
+                break;
             }
-            if (isPaused || isCanceledByUser || isCancelled()) {
-                return false;
-            }
-            logEvent(" -> [SWARM FAILOVER] Chuyển phân đoạn Part " + (partIndex + 1)
-                    + " sang Peer dự phòng " + backupEndpoint + "...");
-            updatePartChunkMatrix(partIndex, peerCount, 0, partTotalLength, DownloadManager.CHUNK_STATE_PAUSED_OR_RETRY);
 
-            if (downloadSinglePart(
-                    partIndex,
-                    backupEndpoint,
+            long blockStart = (long) blockIdx * meta.getBlockSize();
+            long blockLength = (blockIdx == meta.getTotalBlocks() - 1)
+                    ? (totalFileSize - blockStart)
+                    : meta.getBlockSize();
+
+            boolean success = downloadBlockFromPeer(
+                    currentPeer,
                     safeFileName,
                     partFile,
-                    partStartOffset,
-                    partTotalLength,
+                    blockStart,
+                    blockLength,
                     totalFileSize,
-                    peerCount,
                     totalBytesDownloaded,
                     sessionBytesDownloaded,
-                    startNano
-            )) {
-                return true;
+                    startNano,
+                    fatalAuthError
+            );
+
+            if (success) {
+                meta.markBlockCompleted(blockIdx);
+                updateCellChunkMatrix(blockIdx, meta.getTotalBlocks(), DownloadManager.CHUNK_STATE_COMPLETED);
+            } else {
+                // [P2-3 Failover]: Nếu tải thất bại, đẩy block trở lại hàng đợi cho worker khác nhận
+                blockQueue.offer(blockIdx);
+                updateCellChunkMatrix(blockIdx, meta.getTotalBlocks(), DownloadManager.CHUNK_STATE_PAUSED_OR_RETRY);
+
+                // Thử đổi sang một peer khác trong danh sách
+                for (String alt : peerEndpoints) {
+                    if (!alt.equalsIgnoreCase(currentPeer)) {
+                        currentPeer = alt;
+                        break;
+                    }
+                }
+                try {
+                    Thread.sleep(200); // Tránh quay vòng CPU quá nhanh khi rớt mạng
+                } catch (InterruptedException ignored) {
+                    break;
+                }
             }
         }
-        return false;
+        return true;
     }
 
-    private Boolean downloadSinglePart(
-            int partIndex,
+    /**
+     * Tải một block từ peer cụ thể kèm kiểm tra toàn vẹn chặt chẽ (B2).
+     */
+    private boolean downloadBlockFromPeer(
             String peerEndpoint,
             String safeFileName,
             File partFile,
-            long partStartOffset,
-            long partTotalLength,
+            long blockStartOffset,
+            long blockLength,
             long totalFileSize,
-            int peerCount,
             AtomicLong totalBytesDownloaded,
             AtomicLong sessionBytesDownloaded,
-            long startNano
+            long startNano,
+            AtomicBoolean fatalAuthError
     ) {
-        long doneInPart;
-        synchronized (this) {
-            doneInPart = partProgressBytes[partIndex];
-        }
-        long remainingInPart = partTotalLength - doneInPart;
-        if (remainingInPart <= 0) {
-            updatePartChunkMatrix(partIndex, peerCount, partTotalLength, partTotalLength, DownloadManager.CHUNK_STATE_COMPLETED);
-            return true;
-        }
-
-        int activeState = (partIndex % 2 == 0)
-                ? DownloadManager.CHUNK_STATE_ACTIVE_PRIMARY
-                : DownloadManager.CHUNK_STATE_ACTIVE_SWARM;
-        updatePartChunkMatrix(partIndex, peerCount, doneInPart, partTotalLength, activeState);
-
         Peer.HostPort hp = Peer.parseHostPort(peerEndpoint, P2PServer.DEFAULT_PORT);
-        long requestOffset = partStartOffset + doneInPart;
-        logEvent(String.format(Locale.US,
-                " -> [Part %d/%d] Kết nối Peer %s xin đoạn [offset=%d, length=%d bytes]",
-                partIndex + 1, peerCount, hp.toEndpointString(), requestOffset, remainingInPart));
 
         try (Socket socket = new Socket()) {
             socket.connect(new InetSocketAddress(hp.host(), hp.port()), CONNECT_TIMEOUT_MS);
@@ -412,34 +386,39 @@ public class SwarmDownloadTask extends Task<Boolean> {
 
                 dos.writeUTF(P2PServer.CMD_DOWNLOAD_CHUNK);
                 dos.writeUTF(safeFileName);
-                dos.writeLong(requestOffset);
-                dos.writeLong(remainingInPart);
-                dos.writeUTF(authPin);
+                dos.writeLong(blockStartOffset);
+                dos.writeLong(blockLength);
                 dos.flush();
 
-                long remoteTotalSize = dis.readLong();
-                if (remoteTotalSize == P2PServer.CODE_AUTH_FAILED) {
-                    String status = dis.readUTF();
-                    logEvent(" -> [Part " + (partIndex + 1) + "] Từ chối truy cập (" + status
-                            + "): Sai mã PIN bảo mật trên Peer " + hp.toEndpointString());
+                if (!P2PServer.performClientAuth(dis, dos, authPin, P2PServer.CMD_DOWNLOAD_CHUNK)) {
+                    fatalAuthError.set(true);
                     return false;
                 }
-                if (remoteTotalSize < 0) {
+
+                long remoteTotal = dis.readLong();
+                // [B2 Fix]: Kiểm tra remoteTotal == totalFileSize
+                if (remoteTotal != totalFileSize) {
                     return false;
                 }
+
                 long actualChunkLen = dis.readLong();
                 dis.readUTF(); // SHA-256 header
 
+                // [B2 Fix]: Kiểm tra nếu actualChunkLen != blockLength thì coi là lỗi và failover
+                if (actualChunkLen != blockLength) {
+                    return false;
+                }
+
                 byte[] buffer = new byte[CHUNK_BUFFER_SIZE];
                 try (RandomAccessFile raf = new RandomAccessFile(partFile, "rw")) {
-                    raf.seek(requestOffset);
+                    raf.seek(blockStartOffset);
 
-                    long left = actualChunkLen;
-                    while (left > 0) {
+                    long remaining = actualChunkLen;
+                    while (remaining > 0) {
                         if (isPaused || isCanceledByUser || isCancelled()) {
                             return false;
                         }
-                        int maxToRead = (int) Math.min(buffer.length, left);
+                        int maxToRead = (int) Math.min(buffer.length, remaining);
                         int read = dis.read(buffer, 0, maxToRead);
                         if (read == -1) {
                             return false;
@@ -447,72 +426,49 @@ public class SwarmDownloadTask extends Task<Boolean> {
 
                         raf.write(buffer, 0, read);
                         BandwidthLimiter.getInstance().throttle(read);
-                        left -= read;
 
-                        long currentPartDone;
-                        synchronized (this) {
-                            partProgressBytes[partIndex] += read;
-                            currentPartDone = partProgressBytes[partIndex];
-                        }
-
-                        updatePartChunkMatrix(partIndex, peerCount, currentPartDone, partTotalLength, activeState);
-
+                        remaining -= read;
                         long totalDone = totalBytesDownloaded.addAndGet(read);
                         long sessionDone = sessionBytesDownloaded.addAndGet(read);
-                        double speedMBps = calculateSpeedMBps(sessionDone, startNano);
-                        reportSpeed(speedMBps);
 
-                        updateProgress(totalDone, Math.max(totalFileSize, 1));
-                        updateMessage(String.format(Locale.US,
-                                "Đang tải đa nguồn từ %d Peers (%.2f MB/s)",
-                                peerCount, speedMBps));
+                        // [P2-1 Fix]: Throttled UI update
+                        long nowMs = System.currentTimeMillis();
+                        if (nowMs - lastUiUpdateMillis >= UI_THROTTLE_MS) {
+                            lastUiUpdateMillis = nowMs;
+                            double speedMBps = TransferUtil.calculateSpeedMBps(sessionDone, startNano);
+                            reportSpeed(speedMBps);
+                            updateProgress(totalDone, Math.max(totalFileSize, 1));
+                            updateMessage(String.format(Locale.US,
+                                    "Đang tải Swarm (%d Peers - %.2f MB/s)",
+                                    peerEndpoints.size(), speedMBps));
+                        }
                     }
                 }
-                updatePartChunkMatrix(partIndex, peerCount, partTotalLength, partTotalLength, DownloadManager.CHUNK_STATE_COMPLETED);
-                logEvent(String.format(Locale.US,
-                        " -> [Part %d/%d] Hoàn tất phân đoạn từ Peer %s (%s)",
-                        partIndex + 1, peerCount, hp.toEndpointString(), SharedFile.formatSize(partTotalLength)));
                 return true;
             }
         } catch (IOException e) {
-            if (!isPaused && !isCanceledByUser) {
-                logEvent(String.format(Locale.US,
-                        " -> [Part %d/%d] Lỗi kết nối với Peer %s: %s",
-                        partIndex + 1, peerCount, hp.toEndpointString(), e.getMessage()));
-            }
             return false;
         }
     }
 
-    /**
-     * Ánh xạ tiến độ của phân đoạn {@code partIndex} lên các ô tương ứng trên Bản đồ 32 mảnh (BitTorrent Matrix).
-     */
-    private void updatePartChunkMatrix(
-            int partIndex,
-            int peerCount,
-            long doneInPart,
-            long partTotalLength,
-            int activeState
-    ) {
-        if (chunkMatrixCallback == null || peerCount <= 0 || partTotalLength <= 0) {
+    private void updateOverallChunkMatrix(long downloadedBytes, long totalBytes) {
+        if (chunkMatrixCallback == null || totalBytes <= 0) {
             return;
         }
         int totalCells = DownloadManager.MATRIX_CHUNK_COUNT;
-        int startCell = (partIndex * totalCells) / peerCount;
-        int endCell = ((partIndex + 1) * totalCells) / peerCount;
-        int span = Math.max(1, endCell - startCell);
-        int completedInSpan = (int) Math.min(span, (doneInPart * span) / partTotalLength);
-
-        for (int c = startCell; c < endCell; c++) {
-            int offsetIdx = c - startCell;
-            if (offsetIdx < completedInSpan) {
-                chunkMatrixCallback.onChunkUpdate(c, DownloadManager.CHUNK_STATE_COMPLETED);
-            } else if (offsetIdx == completedInSpan) {
-                chunkMatrixCallback.onChunkUpdate(c, activeState);
-            } else {
-                chunkMatrixCallback.onChunkUpdate(c, DownloadManager.CHUNK_STATE_WAITING);
-            }
+        int completedCells = (int) Math.min(totalCells, (downloadedBytes * totalCells) / totalBytes);
+        for (int i = 0; i < completedCells; i++) {
+            chunkMatrixCallback.onChunkUpdate(i, DownloadManager.CHUNK_STATE_COMPLETED);
         }
+    }
+
+    private void updateCellChunkMatrix(int blockIdx, int totalBlocks, int state) {
+        if (chunkMatrixCallback == null || totalBlocks <= 0) {
+            return;
+        }
+        int totalCells = DownloadManager.MATRIX_CHUNK_COUNT;
+        int cellIdx = (int) Math.min(totalCells - 1, ((long) blockIdx * totalCells) / totalBlocks);
+        chunkMatrixCallback.onChunkUpdate(cellIdx, state);
     }
 
     private void markAllChunksCompleted() {
@@ -529,39 +485,9 @@ public class SwarmDownloadTask extends Task<Boolean> {
         }
     }
 
-    private void recordHistory(
-            String fileName,
-            long sizeBytes,
-            String peerEndpoint,
-            double avgSpeedMBps,
-            long durationMs,
-            String shaStatus
-    ) {
-        if (historyCallback != null) {
-            historyCallback.accept(new TransferHistoryItem(
-                    LocalDateTime.now().format(HISTORY_TIME_FMT),
-                    fileName,
-                    sizeBytes,
-                    peerEndpoint,
-                    "Nhận (Swarm Multi-source)",
-                    avgSpeedMBps,
-                    durationMs,
-                    shaStatus
-            ));
-        }
-    }
-
-    private void logEvent(String message) {
+    private void logEvent(String msg) {
         if (eventLogger != null) {
-            eventLogger.accept(message);
+            eventLogger.accept(msg);
         }
-    }
-
-    private static double calculateSpeedMBps(long bytesTransferred, long startTimeNano) {
-        double elapsedSeconds = (System.nanoTime() - startTimeNano) / 1_000_000_000.0;
-        if (elapsedSeconds <= 0.0001) {
-            return 0.0;
-        }
-        return (bytesTransferred / (1024.0 * 1024.0)) / elapsedSeconds;
     }
 }

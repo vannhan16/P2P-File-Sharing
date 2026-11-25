@@ -2,6 +2,8 @@ package com.nhannv.p2p.network;
 
 import com.nhannv.p2p.model.SharedFile;
 import com.nhannv.p2p.model.TransferHistoryItem;
+import com.nhannv.p2p.util.AppThreadPool;
+import com.nhannv.p2p.util.PathUtil;
 import javafx.concurrent.Task;
 
 import java.io.IOException;
@@ -15,9 +17,9 @@ import java.util.function.Supplier;
 
 /**
  * Trình điều phối tải tệp trung tâm (Download Manager) nâng cấp cho Milestone 6:
- * Hỗ trợ kết nối {@code host:port} (Ngrok/Playit), truyền mã PIN bảo mật 4 chữ số,
+ * Hỗ trợ kết nối {@code host:port} (Ngrok/Playit), truyền mã PIN bảo mật theo Challenge-Response,
  * trực quan hóa <b>Bản đồ 32 mảnh tải (BitTorrent Chunk Matrix)</b>,
- * đo tốc độ cho biểu đồ {@code AreaChart} và ghi nhận lịch sử {@link TransferHistoryItem}.
+ * phân loại trạng thái kết thúc {@link DownloadResult} và chống tải chồng (B4).
  */
 public class DownloadManager {
 
@@ -30,7 +32,6 @@ public class DownloadManager {
     public static final int CHUNK_STATE_COMPLETED = 3;
     public static final int CHUNK_STATE_PAUSED_OR_RETRY = 4;
 
-    /** Callback cập nhật trạng thái của ô thứ {@code chunkIndex} (0..31) trên UI. */
     @FunctionalInterface
     public interface ChunkMatrixCallback {
         void onChunkUpdate(int chunkIndex, int state);
@@ -44,7 +45,6 @@ public class DownloadManager {
 
     private SharedFile lastRequestedFile;
     private List<String> lastTargetEndpoints;
-    private long[] savedSwarmPartProgress;
 
     private ResumableDownloadTask activeResumableTask;
     private SwarmDownloadTask activeSwarmTask;
@@ -71,11 +71,20 @@ public class DownloadManager {
         }
     }
 
-    public synchronized Task<Boolean> startDownload(SharedFile sharedFile) {
+    /**
+     * [B4 Fix]: Khởi động phiên tải mới. Kiểm tra chặn tải chồng nếu đang có tác vụ chạy.
+     */
+    public synchronized Task<DownloadResult> startDownload(SharedFile sharedFile) {
         Objects.requireNonNull(sharedFile, "sharedFile");
 
+        if (isDownloading()) {
+            if (eventLogger != null) {
+                eventLogger.accept("CẢNH BÁO: Đang có tác vụ tải khác đang chạy. Vui lòng tạm dừng hoặc đợi tải xong!");
+            }
+            return null;
+        }
+
         if (lastRequestedFile == null || !lastRequestedFile.sha256Hash().equals(sharedFile.sha256Hash())) {
-            savedSwarmPartProgress = null;
             resetAllChunks(CHUNK_STATE_WAITING);
         }
 
@@ -92,13 +101,12 @@ public class DownloadManager {
         }
         if (activeSwarmTask != null && activeSwarmTask.isRunning()) {
             activeSwarmTask.pauseDownload();
-            savedSwarmPartProgress = activeSwarmTask.getPartProgressSnapshot();
             return true;
         }
         return false;
     }
 
-    public synchronized Task<Boolean> resumeCurrentDownload() {
+    public synchronized Task<DownloadResult> resumeCurrentDownload() {
         if (lastRequestedFile == null || lastTargetEndpoints == null || lastTargetEndpoints.isEmpty()) {
             return null;
         }
@@ -111,25 +119,30 @@ public class DownloadManager {
     public synchronized void cancelCurrentDownload() {
         if (activeResumableTask != null) {
             Path partPath = activeResumableTask.getPartFilePath();
+            Path metaPath = activeResumableTask.getPartMetaFilePath();
             activeResumableTask.cancelAndDeletePart();
             activeResumableTask = null;
-            deletePartFileQuietly(partPath);
+            deleteFileQuietly(partPath);
+            deleteFileQuietly(metaPath);
         }
         if (activeSwarmTask != null) {
             Path partPath = activeSwarmTask.getPartFilePath();
+            Path metaPath = activeSwarmTask.getPartMetaFilePath();
             activeSwarmTask.cancelAndDeletePart();
             activeSwarmTask = null;
-            deletePartFileQuietly(partPath);
+            deleteFileQuietly(partPath);
+            deleteFileQuietly(metaPath);
         }
         if (lastRequestedFile != null) {
-            String safeName = Path.of(lastRequestedFile.fileName()).getFileName().toString();
+            String safeName = PathUtil.sanitizeFileName(lastRequestedFile.fileName());
             Path fallbackPart = Path.of(P2PServer.DOWNLOADS_DIR_NAME, safeName + ".part").toAbsolutePath();
-            deletePartFileQuietly(fallbackPart);
+            Path fallbackMeta = Path.of(P2PServer.DOWNLOADS_DIR_NAME, safeName + ".part.meta").toAbsolutePath();
+            deleteFileQuietly(fallbackPart);
+            deleteFileQuietly(fallbackMeta);
             if (eventLogger != null) {
-                eventLogger.accept("Đã hủy tác vụ tải \"" + safeName + "\" và dọn dẹp file .part.");
+                eventLogger.accept("Đã hủy tác vụ tải \"" + safeName + "\" và dọn dẹp file .part, .part.meta.");
             }
         }
-        savedSwarmPartProgress = null;
         resetAllChunks(CHUNK_STATE_WAITING);
     }
 
@@ -142,7 +155,7 @@ public class DownloadManager {
         if (isDownloading() || lastRequestedFile == null) {
             return false;
         }
-        String safeName = Path.of(lastRequestedFile.fileName()).getFileName().toString();
+        String safeName = PathUtil.sanitizeFileName(lastRequestedFile.fileName());
         Path partPath = Path.of(P2PServer.DOWNLOADS_DIR_NAME, safeName + ".part").toAbsolutePath();
         return Files.exists(partPath);
     }
@@ -155,7 +168,7 @@ public class DownloadManager {
         }
     }
 
-    private Task<Boolean> launchTaskInternal() {
+    private Task<DownloadResult> launchTaskInternal() {
         String currentPin = authPinSupplier.get();
         if (lastTargetEndpoints.size() > 1) {
             activeResumableTask = null;
@@ -163,22 +176,12 @@ public class DownloadManager {
                     lastRequestedFile,
                     lastTargetEndpoints,
                     currentPin,
-                    savedSwarmPartProgress,
                     eventLogger,
                     speedSampleCallback,
                     historyCallback,
                     chunkMatrixCallback
             );
-            activeSwarmTask.valueProperty().addListener((obs, oldVal, completedOk) -> {
-                if (Boolean.TRUE.equals(completedOk)) {
-                    savedSwarmPartProgress = null;
-                } else if (activeSwarmTask != null) {
-                    savedSwarmPartProgress = activeSwarmTask.getPartProgressSnapshot();
-                }
-            });
-            Thread t = new Thread(activeSwarmTask, "p2p-swarm-coordinator");
-            t.setDaemon(true);
-            t.start();
+            AppThreadPool.execute(activeSwarmTask);
             return activeSwarmTask;
         } else {
             activeSwarmTask = null;
@@ -192,14 +195,12 @@ public class DownloadManager {
                     historyCallback,
                     chunkMatrixCallback
             );
-            Thread t = new Thread(activeResumableTask, "p2p-resumable-downloader");
-            t.setDaemon(true);
-            t.start();
+            AppThreadPool.execute(activeResumableTask);
             return activeResumableTask;
         }
     }
 
-    private static void deletePartFileQuietly(Path path) {
+    private static void deleteFileQuietly(Path path) {
         if (path != null) {
             try {
                 Files.deleteIfExists(path);

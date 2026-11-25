@@ -25,7 +25,9 @@ import java.nio.file.WatchService;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
@@ -38,43 +40,28 @@ import java.util.zip.ZipOutputStream;
  * Quản lý thư mục chia sẻ ("Shared Folder") tích hợp <b>Java NIO {@link WatchService}</b>
  * để tự động phát hiện tệp thêm mới / chỉnh sửa / xóa theo thời gian thực (Milestone 5).
  *
- * <h2>Giải thích Cơ chế Java NIO {@code WatchService} cho vấn đáp đồ án (Huỳnh Nhân Danh)</h2>
- * <ol>
- *   <li><b>Tại sao dùng {@link WatchService} thay vì dùng vòng lặp {@code while} quét đĩa liên tục?</b>
- *       Nếu dùng vòng lặp {@code Thread.sleep(1000)} rồi gọi {@code folder.listFiles()} liên tục (Polling),
- *       ứng dụng sẽ gây tốn CPU và đọc ổ cứng không cần thiết. Ngược lại, {@code java.nio.file.WatchService}
- *       đăng ký trực tiếp với nhân hệ điều hành (<i>ReadDirectoryChangesW</i> trên Windows). Luồng nền
- *       sẽ ngủ hoàn toàn (0% CPU) tại lệnh {@link WatchService#take()} cho tới khi hệ điều hành bắn sự kiện
- *       có tệp thay đổi!</li>
- *   <li><b>Ba loại sự kiện được lắng nghe:</b>
- *       <ul>
- *         <li>{@link StandardWatchEventKinds#ENTRY_CREATE}: Người dùng vừa copy/thả thêm tệp mới vào thư mục {@code Shared}.</li>
- *         <li>{@link StandardWatchEventKinds#ENTRY_DELETE}: Người dùng vừa xóa một tệp khỏi thư mục {@code Shared}.</li>
- *         <li>{@link StandardWatchEventKinds#ENTRY_MODIFY}: Nội dung tệp trong thư mục {@code Shared} vừa được cập nhật.</li>
- *       </ul>
- *   </li>
- *   <li><b>Cơ chế chống dội sự kiện (Debounce 350ms) &amp; Băm SHA-256 tự động:</b>
- *       Khi Windows Explorer đang copy một tệp lớn vào thư mục {@code Shared}, hệ điều hành sẽ phát ra
- *       hàng loạt sự kiện {@code ENTRY_MODIFY} liên tiếp. Luồng Watcher chờ một khoảng ngắn (350ms) để
- *       quá trình ghi tệp hoàn tất, sau đó tự động tính lại mã băm SHA-256 và gọi callback cập nhật
- *       bảng {@code TableView} trên giao diện qua {@code Platform.runLater()}.</li>
- *   <li><b>Đóng an toàn ({@link #stopWatcher()}):</b>
- *       Khi người dùng tắt ứng dụng, {@code MainApplication.stop()} gọi {@code stopWatcher()} để đóng
- *       {@code WatchService}, giải phóng handle thư mục của hệ điều hành.</li>
- * </ol>
+ * <h2>Các Cải tiến Độ tin cậy &amp; Toàn vẹn (B7)</h2>
+ * <ul>
+ *   <li><b>Cache Freshness theo Size &amp; LastModified:</b> Lưu trữ bộ ba {@code (size, lastModified, sha256)}.
+ *       Khi phục vụ tệp, nếu kích thước hoặc thời điểm sửa đổi trên đĩa khác với cache, hệ thống tự động băm lại.</li>
+ *   <li><b>Chống băm tệp đang copy dở (Stability Polling):</b> Luồng Watcher kiểm tra kích thước tệp ổn định
+ *       (không tăng thêm trong 1 giây) trước khi tiến hành tính toán mã băm SHA-256.</li>
+ * </ul>
  */
 public class SharedFolderManager implements AutoCloseable {
 
     private static final Logger LOG = Logger.getLogger(SharedFolderManager.class.getName());
 
-    /** Tên thư mục chia sẻ mặc định trong thư mục gốc dự án. */
     public static final String DEFAULT_SHARED_DIR_NAME = "Shared";
+
+    public record FileHashEntry(long size, long lastModified, String sha256, AIMetadata aiMetadata) {
+    }
 
     private volatile Path sharedFolderPath;
     private final String localHostName;
     private final List<SharedFile> cachedSharedFiles = new CopyOnWriteArrayList<>();
+    private final Map<String, FileHashEntry> fileStatsCache = new ConcurrentHashMap<>();
 
-    /** Callback báo về UI khi WatchService phát hiện thay đổi: (danh sách mới, thông điệp sự kiện). */
     private volatile BiConsumer<List<SharedFile>, String> onFolderChangedCallback;
 
     private final AtomicBoolean watcherRunning = new AtomicBoolean(false);
@@ -88,9 +75,6 @@ public class SharedFolderManager implements AutoCloseable {
         ensureDirectoryExists(this.sharedFolderPath);
     }
 
-    /**
-     * Đăng ký callback và khởi động luồng Daemon {@link WatchService} theo dõi thư mục {@code Shared}.
-     */
     public synchronized void startRealTimeWatcher(BiConsumer<List<SharedFile>, String> onFolderChangedCallback) {
         this.onFolderChangedCallback = onFolderChangedCallback;
         if (watcherRunning.get()) {
@@ -111,20 +95,20 @@ public class SharedFolderManager implements AutoCloseable {
     }
 
     /**
-     * Vòng lặp nền lắng nghe các sự kiện {@code ENTRY_CREATE}, {@code ENTRY_DELETE}, {@code ENTRY_MODIFY}
-     * từ hệ điều hành Windows/Linux/macOS.
+     * Vòng lặp nền lắng nghe sự kiện từ WatchService kèm cơ chế chờ file ổn định (B7).
      */
     private void runWatchLoop() {
         while (watcherRunning.get()) {
             WatchKey key;
             try {
-                // Chặn (block) với 0% CPU cho tới khi có tệp được thêm/sửa/xóa trong thư mục Shared.
                 key = watchService.take();
             } catch (InterruptedException | ClosedWatchServiceException e) {
                 break;
             }
 
             List<String> eventDescriptions = new ArrayList<>();
+            List<String> modifiedOrCreatedFiles = new ArrayList<>();
+
             for (WatchEvent<?> event : key.pollEvents()) {
                 WatchEvent.Kind<?> kind = event.kind();
                 if (kind == StandardWatchEventKinds.OVERFLOW) {
@@ -134,39 +118,64 @@ public class SharedFolderManager implements AutoCloseable {
                 String fileName = (ctx != null) ? ctx.toString() : "unknown";
                 if (kind == StandardWatchEventKinds.ENTRY_CREATE) {
                     eventDescriptions.add("Thêm mới \"" + fileName + "\"");
+                    modifiedOrCreatedFiles.add(fileName);
                 } else if (kind == StandardWatchEventKinds.ENTRY_DELETE) {
                     eventDescriptions.add("Xóa \"" + fileName + "\"");
+                    fileStatsCache.remove(fileName);
                 } else if (kind == StandardWatchEventKinds.ENTRY_MODIFY) {
                     eventDescriptions.add("Cập nhật \"" + fileName + "\"");
+                    modifiedOrCreatedFiles.add(fileName);
                 }
             }
 
             boolean valid = key.reset();
             if (!valid) {
-                // Thư mục cũ không còn hợp lệ (hoặc đã chuyển sang thư mục mới).
                 continue;
             }
 
             if (!eventDescriptions.isEmpty() && watcherRunning.get()) {
-                // Chờ ngắn 350ms (Debounce) để hệ điều hành ghi xong tệp mới vào đĩa trước khi băm SHA-256.
-                try {
-                    Thread.sleep(350);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                }
-                // Quét hết các sự kiện dồn thêm trong lúc chờ 350ms.
+                // [B7 Fix]: Chờ tệp ổn định (không thay đổi kích thước trong 1 giây) trước khi băm
+                waitForFilesStabilized(modifiedOrCreatedFiles);
+
+                // Lấy hết các sự kiện dồn thêm
                 key.pollEvents();
 
                 List<SharedFile> updatedList = scanAndHashSync();
                 BiConsumer<List<SharedFile>, String> callback = this.onFolderChangedCallback;
                 if (callback != null) {
-                    String summary = "WatchService phát hiện thay đổi trong thư mục Shared ("
+                    String summary = "WatchService phát hiện thay đổi ("
                             + String.join(", ", eventDescriptions) + ") -> Đã đồng bộ "
                             + updatedList.size() + " tệp.";
                     callback.accept(updatedList, summary);
                 }
             }
+        }
+    }
+
+    /**
+     * Chờ cho đến khi tất cả các tệp đang ghi dở ngừng thay đổi kích thước.
+     */
+    private void waitForFilesStabilized(List<String> fileNames) {
+        if (fileNames.isEmpty()) {
+            return;
+        }
+        try {
+            Thread.sleep(600);
+            for (String name : fileNames) {
+                File f = sharedFolderPath.resolve(name).toFile();
+                if (!f.exists() || !f.isFile()) {
+                    continue;
+                }
+                long len1 = f.length();
+                Thread.sleep(400);
+                long len2 = f.length();
+                if (len1 != len2) {
+                    // File vẫn đang được copy, chờ thêm 1 giây
+                    Thread.sleep(1000);
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -189,9 +198,6 @@ public class SharedFolderManager implements AutoCloseable {
         }
     }
 
-    /**
-     * Đóng {@link WatchService} và dừng luồng theo dõi an toàn khi thoát ứng dụng.
-     */
     public synchronized void stopWatcher() {
         watcherRunning.set(false);
         if (currentWatchKey != null) {
@@ -216,24 +222,19 @@ public class SharedFolderManager implements AutoCloseable {
         stopWatcher();
     }
 
-    /** Trả về đường dẫn thư mục chia sẻ hiện tại. */
     public Path getSharedFolderPath() {
         return sharedFolderPath;
     }
 
-    /** Đổi thư mục chia sẻ sang thư mục mới do người dùng chọn và tự động chuyển WatchService sang thư mục mới. */
     public synchronized void setSharedFolder(File directory) {
         Objects.requireNonNull(directory, "directory");
         Path path = directory.toPath().toAbsolutePath();
         ensureDirectoryExists(path);
         this.sharedFolderPath = path;
+        fileStatsCache.clear();
         registerDirectoryWithWatcher(path);
     }
 
-    /**
-     * Sao chép danh sách tệp hoặc nén toàn bộ thư mục (do người dùng Kéo &amp; Thả từ ngoài màn hình vào {@code TableView})
-     * vào thư mục {@code Shared} hiện tại. {@link WatchService} sẽ tự động bắt sự kiện và băm SHA-256!
-     */
     public int copyDroppedFilesToSharedFolder(List<File> droppedFiles) throws IOException {
         if (droppedFiles == null || droppedFiles.isEmpty()) {
             return 0;
@@ -259,10 +260,6 @@ public class SharedFolderManager implements AutoCloseable {
         return copied;
     }
 
-    /**
-     * Đóng gói toàn bộ một thư mục (bao gồm cả thư mục con) thành tệp {@code <Tên_Thư_Mục>.zip}
-     * lưu trực tiếp vào thư mục {@code Shared} hiện tại theo cơ chế đọc khối 64KB (Zero-OOM).
-     */
     public File packageDirectoryToSharedZip(File sourceDirectory) throws IOException {
         Objects.requireNonNull(sourceDirectory, "sourceDirectory");
         if (!sourceDirectory.exists() || !sourceDirectory.isDirectory()) {
@@ -275,9 +272,6 @@ public class SharedFolderManager implements AutoCloseable {
         return targetZip;
     }
 
-    /**
-     * Nén đệ quy toàn bộ cây thư mục {@code sourceDir} thành tệp {@code destinationZip} với bộ đệm 64KB.
-     */
     public static void zipDirectoryToFile(File sourceDir, File destinationZip) throws IOException {
         Path rootPath = sourceDir.toPath().toAbsolutePath().normalize();
         Path destPath = destinationZip.toPath().toAbsolutePath().normalize();
@@ -307,14 +301,10 @@ public class SharedFolderManager implements AutoCloseable {
         }
     }
 
-    /** Lấy danh sách tệp chia sẻ đã được băm SHA-256 gần nhất (an toàn đa luồng). */
     public List<SharedFile> getSharedFiles() {
         return Collections.unmodifiableList(new ArrayList<>(cachedSharedFiles));
     }
 
-    /**
-     * Tìm tệp thực tế trên đĩa trong thư mục chia sẻ theo tên tệp để phục vụ lệnh {@code DOWNLOAD_FILE} / {@code DOWNLOAD_CHUNK}.
-     */
     public File resolveSharedFileOnDisk(String requestedFileName) {
         if (requestedFileName == null || requestedFileName.isBlank()) {
             return null;
@@ -328,23 +318,48 @@ public class SharedFolderManager implements AutoCloseable {
         return (file.exists() && file.isFile()) ? file : null;
     }
 
-    /** Tìm metadata {@link SharedFile} đã băm sẵn theo tên tệp. */
+    /**
+     * [B7 Fix]: Tìm metadata kèm xác thực tính tươi mới (Freshness check).
+     * Nếu file trên đĩa đã đổi kích thước hoặc lastModified so với cache, băm lại ngay!
+     */
     public SharedFile findMetadataByName(String fileName) {
         if (fileName == null) {
             return null;
         }
-        for (SharedFile sf : cachedSharedFiles) {
-            if (sf.fileName().equals(fileName)) {
-                return sf;
-            }
+        File diskFile = resolveSharedFileOnDisk(fileName);
+        if (diskFile == null || !diskFile.exists()) {
+            return null;
         }
-        return null;
+
+        FileHashEntry entry = fileStatsCache.get(fileName);
+        if (entry != null && entry.size() == diskFile.length() && entry.lastModified() == diskFile.lastModified()) {
+            return new SharedFile(
+                    fileName,
+                    entry.size(),
+                    entry.sha256(),
+                    "LOCAL",
+                    localHostName
+            ).withAiMetadata(entry.aiMetadata());
+        }
+
+        // Đã đổi nội dung: băm lại đồng bộ
+        try {
+            String freshHash = HashUtil.calculateSHA256(diskFile);
+            AIMetadata aiMeta = AIManager.getInstance().analyzeFileWithCache(diskFile, freshHash);
+            fileStatsCache.put(fileName, new FileHashEntry(diskFile.length(), diskFile.lastModified(), freshHash, aiMeta));
+            return new SharedFile(
+                    fileName,
+                    diskFile.length(),
+                    freshHash,
+                    "LOCAL",
+                    localHostName
+            ).withAiMetadata(aiMeta);
+        } catch (IOException e) {
+            LOG.log(Level.WARNING, "Không thể cập nhật hash cho file: " + fileName, e);
+            return null;
+        }
     }
 
-    /**
-     * Quét đồng bộ thư mục chia sẻ và tính SHA-256 cho từng tệp.
-     * <b>Chỉ gọi hàm này từ luồng nền</b>.
-     */
     public List<SharedFile> scanAndHashSync() {
         Path folder = this.sharedFolderPath;
         ensureDirectoryExists(folder);
@@ -352,17 +367,33 @@ public class SharedFolderManager implements AutoCloseable {
         File[] files = folder.toFile().listFiles(File::isFile);
         if (files == null || files.length == 0) {
             cachedSharedFiles.clear();
+            fileStatsCache.clear();
             return List.of();
         }
 
         List<SharedFile> result = new ArrayList<>(files.length);
         for (File file : files) {
             try {
-                String sha256 = HashUtil.calculateSHA256(file);
-                AIMetadata aiMeta = AIManager.getInstance().analyzeFileWithCache(file, sha256);
+                String fileName = file.getName();
+                long curSize = file.length();
+                long curMod = file.lastModified();
+
+                FileHashEntry cached = fileStatsCache.get(fileName);
+                String sha256;
+                AIMetadata aiMeta;
+
+                if (cached != null && cached.size() == curSize && cached.lastModified() == curMod) {
+                    sha256 = cached.sha256();
+                    aiMeta = cached.aiMetadata();
+                } else {
+                    sha256 = HashUtil.calculateSHA256(file);
+                    aiMeta = AIManager.getInstance().analyzeFileWithCache(file, sha256);
+                    fileStatsCache.put(fileName, new FileHashEntry(curSize, curMod, sha256, aiMeta));
+                }
+
                 SharedFile sharedFile = new SharedFile(
-                        file.getName(),
-                        file.length(),
+                        fileName,
+                        curSize,
                         sha256,
                         "LOCAL",
                         localHostName
@@ -378,9 +409,6 @@ public class SharedFolderManager implements AutoCloseable {
         return Collections.unmodifiableList(result);
     }
 
-    /**
-     * Tạo một JavaFX {@link Task} quét thư mục chia sẻ và tính SHA-256 trên luồng nền.
-     */
     public Task<List<SharedFile>> createScanTask() {
         return new Task<>() {
             @Override
@@ -391,6 +419,7 @@ public class SharedFolderManager implements AutoCloseable {
                 File[] files = folder.toFile().listFiles(File::isFile);
                 if (files == null || files.length == 0) {
                     cachedSharedFiles.clear();
+                    fileStatsCache.clear();
                     updateProgress(1.0, 1.0);
                     updateMessage("Trạng thái: Thư mục chia sẻ (" + folder.getFileName() + ") đang trống");
                     return List.of();
@@ -406,11 +435,26 @@ public class SharedFolderManager implements AutoCloseable {
                     updateProgress(i, total);
                     updateMessage("Trạng thái: Đang băm SHA-256 & gắn thẻ AI (" + (i + 1) + "/" + total + "): " + f.getName());
                     try {
-                        String sha256 = HashUtil.calculateSHA256(f);
-                        AIMetadata aiMeta = AIManager.getInstance().analyzeFileWithCache(f, sha256);
+                        String fileName = f.getName();
+                        long curSize = f.length();
+                        long curMod = f.lastModified();
+
+                        FileHashEntry cached = fileStatsCache.get(fileName);
+                        String sha256;
+                        AIMetadata aiMeta;
+
+                        if (cached != null && cached.size() == curSize && cached.lastModified() == curMod) {
+                            sha256 = cached.sha256();
+                            aiMeta = cached.aiMetadata();
+                        } else {
+                            sha256 = HashUtil.calculateSHA256(f);
+                            aiMeta = AIManager.getInstance().analyzeFileWithCache(f, sha256);
+                            fileStatsCache.put(fileName, new FileHashEntry(curSize, curMod, sha256, aiMeta));
+                        }
+
                         scanned.add(new SharedFile(
-                                f.getName(),
-                                f.length(),
+                                fileName,
+                                curSize,
                                 sha256,
                                 "LOCAL",
                                 localHostName

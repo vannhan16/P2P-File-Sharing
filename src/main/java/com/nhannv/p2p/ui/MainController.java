@@ -10,10 +10,13 @@ import com.nhannv.p2p.model.SharedFile;
 import com.nhannv.p2p.model.TransferHistoryItem;
 import com.nhannv.p2p.network.DiscoveryService;
 import com.nhannv.p2p.network.DownloadManager;
+import com.nhannv.p2p.network.DownloadResult;
 import com.nhannv.p2p.network.FileSenderTask;
 import com.nhannv.p2p.network.P2PServer;
 import com.nhannv.p2p.network.PeerDiscoveryListener;
+import com.nhannv.p2p.util.AppThreadPool;
 import com.nhannv.p2p.util.BandwidthLimiter;
+import com.nhannv.p2p.util.CryptoUtil;
 import com.nhannv.p2p.util.FirewallUtil;
 import com.nhannv.p2p.util.HashUtil;
 import com.nhannv.p2p.util.SharedFolderManager;
@@ -782,12 +785,29 @@ public class MainController implements PeerDiscoveryListener {
     // BẢO MẬT PIN, HỘP THOẠI PHÊ DUYỆT PUSH & MÃ MỜI 1-CLICK (host:port#PIN)
     // ------------------------------------------------------------------------------------------
 
+    private boolean isPinMasked = true;
+
     private void initializeSecurityPinControls() {
-        String randomPin = String.format("%04d", ThreadLocalRandom.current().nextInt(10_000));
+        String securePin = CryptoUtil.generateSecurePin6();
         if (myPinTextField != null) {
-            myPinTextField.setText(randomPin);
+            myPinTextField.setText(securePin);
         }
-        updatePinHeaderPill(false, randomPin);
+        if (pinEnableCheckBox != null) {
+            pinEnableCheckBox.setSelected(true);
+        }
+        if (askPushConfirmCheckBox != null) {
+            askPushConfirmCheckBox.setSelected(true);
+        }
+        if (pinStatusPillLabel != null) {
+            pinStatusPillLabel.setOnMouseClicked(e -> {
+                isPinMasked = !isPinMasked;
+                boolean enabled = pinEnableCheckBox != null && pinEnableCheckBox.isSelected();
+                String pin = (myPinTextField != null) ? myPinTextField.getText() : "";
+                updatePinHeaderPill(enabled, pin);
+            });
+            pinStatusPillLabel.setTooltip(new Tooltip("Nhấp để ẩn/hiện mã PIN (Chế độ chống lộ khi chia sẻ màn hình)"));
+        }
+        updatePinHeaderPill(true, securePin);
     }
 
     private void updatePinHeaderPill(boolean enabled, String pin) {
@@ -795,7 +815,8 @@ public class MainController implements PeerDiscoveryListener {
             return;
         }
         if (enabled && pin != null && !pin.isBlank()) {
-            pinStatusPillLabel.setText("PIN: " + pin);
+            String displayPin = isPinMasked ? "******" : pin;
+            pinStatusPillLabel.setText("PIN: " + displayPin);
             pinStatusPillLabel.getStyleClass().setAll("network-pill", "pill-warning");
             pinStatusPillLabel.setGraphic(icon(Feather.LOCK, 12, "#F59E0B"));
         } else {
@@ -818,9 +839,8 @@ public class MainController implements PeerDiscoveryListener {
         updatePinHeaderPill(enabled, pin);
 
         if (enabled) {
-            appendNetworkLog("[BẢO MẬT PIN] Đã BẬT bảo vệ bằng mã PIN (" + pin
-                    + "). Mọi yêu cầu tải/gửi tệp/chat tới máy bạn phải kèm đúng mã PIN này.");
-            setStatus("Đã bật mã PIN bảo vệ (" + pin + ").");
+            appendNetworkLog("[BẢO MẬT PIN] Đã BẬT bảo vệ bằng mã PIN (******). Mọi yêu cầu tải/gửi tệp/chat tới máy bạn phải kèm đúng mã PIN này.");
+            setStatus("Đã bật mã PIN bảo vệ (******).");
         } else {
             appendNetworkLog("[BẢO MẬT PIN] Đã TẮT mã PIN bảo vệ — cho phép truyền tệp tự do.");
             setStatus("Đã tắt mã PIN bảo vệ.");
@@ -845,10 +865,21 @@ public class MainController implements PeerDiscoveryListener {
         runOnFxThread(() -> {
             Alert alert = new Alert(Alert.AlertType.CONFIRMATION);
             alert.setTitle("Yêu cầu gửi tệp trực tiếp (Incoming Push Request)");
-            alert.setHeaderText("Một thiết bị Peer muốn gửi tệp vào máy của bạn!");
-            alert.setContentText("Thông tin tệp: " + senderAndFile
-                    + "\nDung lượng: " + SharedFile.formatSize(fileSizeBytes == null ? 0L : fileSizeBytes)
-                    + "\n\nBạn có đồng ý nhận tệp này vào thư mục Downloads/ không?");
+
+            boolean dangerous = com.nhannv.p2p.util.PathUtil.isPotentiallyDangerousFile(senderAndFile);
+            if (dangerous) {
+                alert.setAlertType(Alert.AlertType.WARNING);
+                alert.setHeaderText("CẢNH BÁO NGUY HIỂM: Tệp thực thi/kịch bản có nguy cơ độc hại!");
+                alert.setContentText("CẢNH BÁO AN NINH: Peer từ xa muốn gửi tệp thực thi: " + senderAndFile
+                        + "\nDung lượng: " + SharedFile.formatSize(fileSizeBytes == null ? 0L : fileSizeBytes)
+                        + "\n\nCác tệp có đuôi mở rộng này có thể chứa mã độc thực thi trực tiếp trên máy của bạn."
+                        + "\nBạn có THẬT SỰ tin tưởng người gửi và đồng ý nhận tệp này vào Downloads/ không?");
+            } else {
+                alert.setHeaderText("Một thiết bị Peer muốn gửi tệp vào máy của bạn!");
+                alert.setContentText("Thông tin tệp: " + senderAndFile
+                        + "\nDung lượng: " + SharedFile.formatSize(fileSizeBytes == null ? 0L : fileSizeBytes)
+                        + "\n\nBạn có đồng ý nhận tệp này vào thư mục Downloads/ không?");
+            }
             ButtonType acceptBtn = new ButtonType("Đồng ý nhận (Accept)");
             ButtonType rejectBtn = new ButtonType("Từ chối (Reject)");
             alert.getButtonTypes().setAll(acceptBtn, rejectBtn);
@@ -908,7 +939,7 @@ public class MainController implements PeerDiscoveryListener {
         Peer.InviteToken invite = Peer.parseInviteToken(trimmedInput, P2PServer.DEFAULT_PORT);
         if (!invite.pin().isEmpty() && peerPinTextField != null) {
             peerPinTextField.setText(invite.pin());
-            appendNetworkLog("Đã tự động nhận diện mã PIN đối tác (" + invite.pin() + ") từ Mã Mời!");
+            appendNetworkLog("Đã tự động nhận diện mã PIN đối tác (******) từ Mã Mời!");
         }
 
         Peer.HostPort target = invite.toHostPort();
@@ -949,7 +980,7 @@ public class MainController implements PeerDiscoveryListener {
                     );
                 }
 
-                List<SharedFile> files = P2PServer.requestFileListFromPeer(connectedPeer);
+                List<SharedFile> files = P2PServer.requestFileListFromPeer(connectedPeer, getPeerAuthPinInput());
 
                 updateProgress(1.0, 1.0);
                 updateMessage("Trạng thái: Đã kết nối thành công tới " + connectedPeer
@@ -1007,9 +1038,7 @@ public class MainController implements PeerDiscoveryListener {
         });
 
         bindUiToTask(connectTask);
-        Thread t = new Thread(connectTask, "p2p-direct-endpoint-connector");
-        t.setDaemon(true);
-        t.start();
+        AppThreadPool.execute(connectTask);
     }
 
     // ------------------------------------------------------------------------------------------
@@ -1709,16 +1738,13 @@ public class MainController implements PeerDiscoveryListener {
         boolean askPush = askPushConfirmCheckBox != null && askPushConfirmCheckBox.isSelected();
         p2pServer.setAskBeforeAcceptingPush(askPush);
 
-        bindUiToTask(p2pServer);
-        p2pServer.messageProperty().addListener((obs, oldMsg, newMsg) -> {
+        p2pServer.setStatusMessageCallback(msg -> {
             if (!downloadManager.isDownloading()) {
-                bindUiToTask(p2pServer);
+                runOnFxThread(() -> setStatus(msg));
             }
         });
 
-        Thread serverThread = new Thread(p2pServer, "p2p-multi-command-server");
-        serverThread.setDaemon(true);
-        serverThread.start();
+        AppThreadPool.execute(p2pServer);
         appendNetworkLog("TCP Multi-Command Server lắng nghe cổng " + P2PServer.DEFAULT_PORT
                 + " (PING, LIST_FILES, DOWNLOAD_FILE, DOWNLOAD_CHUNK, PUSH_FILE, CHAT_MESSAGE + AES-256).");
     }
@@ -1735,6 +1761,7 @@ public class MainController implements PeerDiscoveryListener {
         if (p2pServer != null) {
             p2pServer.stopServer();
         }
+        AppThreadPool.shutdownAll();
     }
 
     // ------------------------------------------------------------------------------------------
@@ -2180,7 +2207,7 @@ public class MainController implements PeerDiscoveryListener {
                     updateMessage("Trạng thái: Đang gửi LIST_FILES tới " + peer + " ("
                             + queried + "/" + snapshotPeers.size() + ")...");
                     try {
-                        combined.addAll(P2PServer.requestFileListFromPeer(peer));
+                        combined.addAll(P2PServer.requestFileListFromPeer(peer, getPeerAuthPinInput()));
                     } catch (IOException ignored) {
                     }
                 }
@@ -2201,9 +2228,7 @@ public class MainController implements PeerDiscoveryListener {
         });
 
         bindUiToTask(refreshTask);
-        Thread thread = new Thread(refreshTask, "p2p-refresh-files");
-        thread.setDaemon(true);
-        thread.start();
+        AppThreadPool.execute(refreshTask);
     }
 
     @FXML
@@ -2218,9 +2243,11 @@ public class MainController implements PeerDiscoveryListener {
             return;
         }
 
-        Task<Boolean> downloadTask = downloadManager.startDownload(selectedFile);
-        attachDownloadAuthFailureAlert(downloadTask, selectedFile.ownerDisplay());
-        bindUiToTask(downloadTask);
+        Task<DownloadResult> downloadTask = downloadManager.startDownload(selectedFile);
+        if (downloadTask != null) {
+            attachDownloadAuthFailureAlert(downloadTask, selectedFile.ownerDisplay());
+            bindUiToTask(downloadTask);
+        }
     }
 
     @FXML
@@ -2233,7 +2260,7 @@ public class MainController implements PeerDiscoveryListener {
 
     @FXML
     private void handleResumeDownload() {
-        Task<Boolean> resumedTask = downloadManager.resumeCurrentDownload();
+        Task<DownloadResult> resumedTask = downloadManager.resumeCurrentDownload();
         if (resumedTask != null) {
             attachDownloadAuthFailureAlert(resumedTask, "Peer");
             bindUiToTask(resumedTask);
@@ -2280,7 +2307,15 @@ public class MainController implements PeerDiscoveryListener {
         handleChooseFile();
     }
 
-    private void attachDownloadAuthFailureAlert(Task<Boolean> task, String endpointLabel) {
+    private void attachDownloadAuthFailureAlert(Task<DownloadResult> task, String endpointLabel) {
+        if (task == null) {
+            return;
+        }
+        task.valueProperty().addListener((obs, oldVal, newVal) -> {
+            if (newVal == DownloadResult.AUTH_FAILED) {
+                runOnFxThread(() -> showPinAuthFailedAlert(endpointLabel, "Mã PIN xác thực không chính xác hoặc đã bị từ chối/khóa IP."));
+            }
+        });
         task.exceptionProperty().addListener((obs, oldEx, newEx) -> {
             if (newEx != null && newEx.getMessage() != null
                     && (newEx.getMessage().contains("AUTH_FAILED") || newEx.getMessage().contains("PIN"))) {
@@ -2311,10 +2346,7 @@ public class MainController implements PeerDiscoveryListener {
             rebuildMergedFileTable();
         });
         bindUiToTask(scanTask);
-
-        Thread scanThread = new Thread(scanTask, "p2p-shared-folder-scanner");
-        scanThread.setDaemon(true);
-        scanThread.start();
+        AppThreadPool.execute(scanTask);
     }
 
     private void fetchFilesFromPeersAsync(List<Peer> peersToQuery) {
@@ -2327,7 +2359,7 @@ public class MainController implements PeerDiscoveryListener {
                 List<SharedFile> fetched = new ArrayList<>();
                 for (Peer peer : peersToQuery) {
                     try {
-                        fetched.addAll(P2PServer.requestFileListFromPeer(peer));
+                        fetched.addAll(P2PServer.requestFileListFromPeer(peer, getPeerAuthPinInput()));
                     } catch (IOException ignored) {
                     }
                 }
@@ -2349,9 +2381,7 @@ public class MainController implements PeerDiscoveryListener {
             }
         });
 
-        Thread t = new Thread(listTask, "p2p-list-files-client");
-        t.setDaemon(true);
-        t.start();
+        AppThreadPool.execute(listTask);
     }
 
     private void addOrUpdateFileEntries(List<SharedFile> incomingFiles, boolean replaceAll) {

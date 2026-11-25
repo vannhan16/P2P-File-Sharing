@@ -7,6 +7,7 @@ Downloads/*
 Shared/*
 !Shared/.gitkeep
 *.part
+*.part.meta
 .p2p-ai-cache.properties
 .p2p-ai-config.properties
 

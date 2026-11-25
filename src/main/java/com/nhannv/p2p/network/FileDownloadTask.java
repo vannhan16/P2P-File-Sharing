@@ -4,6 +4,7 @@ import com.nhannv.p2p.model.Peer;
 import com.nhannv.p2p.model.SharedFile;
 import com.nhannv.p2p.util.BandwidthLimiter;
 import com.nhannv.p2p.util.HashUtil;
+import com.nhannv.p2p.util.PathUtil;
 import javafx.concurrent.Task;
 
 import java.io.BufferedInputStream;
@@ -25,9 +26,16 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * Tác vụ tải tệp từ một Peer khác về máy (Pull Protocol), kết hợp đo tốc độ thời gian thực (MB/s),
- * hỗ trợ {@code host:port}, mã PIN xác thực 4 chữ số và <b>On-the-fly SHA-256</b>.
+ * Tác vụ tải tệp cũ (Legacy Download Task).
+ * <p>
+ * <b>Ghi chú Kiến trúc (B11):</b> Lớp này là phiên bản sơ khai từ Milestone 3, không hỗ trợ
+ * {@code .part}, không hỗ trợ Resume và không được quản lý bởi {@link DownloadManager}.
+ * Toàn bộ tính năng tải tệp hiện đại của hệ thống đã chuyển sang {@link ResumableDownloadTask}
+ * và {@link SwarmDownloadTask}.
+ *
+ * @deprecated Mã nguồn cũ giữ lại làm tài liệu đối chiếu (Legacy Reference), không sử dụng trong luồng chạy chính.
  */
+@Deprecated(since = "legacy", forRemoval = false)
 public class FileDownloadTask extends Task<Boolean> {
 
     private static final Logger LOG = Logger.getLogger(FileDownloadTask.class.getName());
@@ -91,37 +99,30 @@ public class FileDownloadTask extends Task<Boolean> {
                      DataInputStream dis = new DataInputStream(
                              new BufferedInputStream(socket.getInputStream(), CHUNK_BUFFER_SIZE))) {
 
-                    // Gửi Command Header "DOWNLOAD_FILE" kèm tên tệp và mã PIN xác thực.
                     dos.writeUTF(P2PServer.CMD_DOWNLOAD_FILE);
-                    dos.writeUTF(fileName);
-                    dos.writeUTF(authPin);
+                    dos.writeUTF(PathUtil.sanitizeFileName(fileName));
                     dos.flush();
 
-                    long totalBytes = dis.readLong();
-                    if (totalBytes == P2PServer.CODE_AUTH_FAILED) {
-                        String status = dis.readUTF();
+                    if (!P2PServer.performClientAuth(dis, dos, authPin, P2PServer.CMD_DOWNLOAD_FILE)) {
                         updateProgress(0.0, 1.0);
-                        updateMessage("Từ chối truy cập (" + status + "): Sai mã PIN bảo mật của Peer!");
+                        updateMessage("Từ chối truy cập: Sai mã PIN bảo mật!");
                         return false;
                     }
+
+                    long totalBytes = dis.readLong();
                     if (totalBytes < 0) {
                         updateProgress(0.0, 1.0);
-                        updateMessage("Lỗi: Tệp \"" + fileName + "\" không còn tồn tại trên máy Peer!");
+                        updateMessage("Lỗi: Tệp \"" + fileName + "\" không tồn tại trên Peer!");
                         return false;
                     }
+
                     String expectedSha256 = dis.readUTF();
+                    outputFile = PathUtil.resolveSafeOutputFile(downloadDirectory, fileName);
 
-                    String safeFileName = Path.of(fileName).getFileName().toString();
-                    outputFile = P2PServer.resolveOutputFile(downloadDirectory, safeFileName);
-
-                    MessageDigest sha256Digest = HashUtil.newSha256Digest();
+                    MessageDigest digest = HashUtil.newSha256Digest();
                     byte[] buffer = new byte[CHUNK_BUFFER_SIZE];
-                    long bytesReadTotal = 0;
-
-                    long transferStartNano = System.nanoTime();
-                    long windowStartNano = transferStartNano;
-                    long bytesInWindow = 0;
-                    double currentSpeedMBps = 0.0;
+                    long totalBytesRead = 0;
+                    long startNano = System.nanoTime();
 
                     try (BufferedOutputStream bos = new BufferedOutputStream(
                             new FileOutputStream(outputFile), CHUNK_BUFFER_SIZE)) {
@@ -129,85 +130,59 @@ public class FileDownloadTask extends Task<Boolean> {
                         long remaining = totalBytes;
                         while (remaining > 0) {
                             if (isCancelled()) {
+                                updateMessage("Trạng thái: Đã hủy tải tệp \"" + fileName + "\"");
                                 bos.close();
                                 Files.deleteIfExists(outputFile.toPath());
-                                updateMessage("Đã hủy tải tệp: " + fileName);
                                 return false;
                             }
 
                             int maxToRead = (int) Math.min(buffer.length, remaining);
-                            int read = dis.read(buffer, 0, maxToRead);
-                            if (read == -1) {
+                            int bytesRead = dis.read(buffer, 0, maxToRead);
+                            if (bytesRead == -1) {
                                 break;
                             }
 
-                            bos.write(buffer, 0, read);
-                            sha256Digest.update(buffer, 0, read);
-                            BandwidthLimiter.getInstance().throttle(read);
+                            bos.write(buffer, 0, bytesRead);
+                            digest.update(buffer, 0, bytesRead);
+                            BandwidthLimiter.getInstance().throttle(bytesRead);
 
-                            bytesReadTotal += read;
-                            remaining -= read;
-                            bytesInWindow += read;
+                            totalBytesRead += bytesRead;
+                            remaining -= bytesRead;
 
-                            long nowNano = System.nanoTime();
-                            double windowSeconds = (nowNano - windowStartNano) / 1_000_000_000.0;
-                            if (windowSeconds >= 0.15) {
-                                currentSpeedMBps = (bytesInWindow / (1024.0 * 1024.0)) / windowSeconds;
-                                windowStartNano = nowNano;
-                                bytesInWindow = 0;
-                            } else if (currentSpeedMBps == 0.0) {
-                                double totalElapsed = Math.max((nowNano - transferStartNano) / 1_000_000_000.0, 0.001);
-                                currentSpeedMBps = (bytesReadTotal / (1024.0 * 1024.0)) / totalElapsed;
-                            }
-
-                            updateProgress(bytesReadTotal, Math.max(totalBytes, 1));
-                            updateMessage(String.format(Locale.US,
-                                    "Đang tải: %s (%.2f MB/s)",
-                                    fileName, currentSpeedMBps));
+                            updateProgress(totalBytesRead, Math.max(totalBytes, 1));
+                            double elapsedSec = (System.nanoTime() - startNano) / 1_000_000_000.0;
+                            double speedMbps = elapsedSec > 0.0001 ? (totalBytesRead / (1024.0 * 1024.0)) / elapsedSec : 0.0;
+                            updateMessage(String.format(Locale.US, "Đang tải: %s (%.2f MB/s)", fileName, speedMbps));
                         }
                         bos.flush();
                     }
 
-                    if (bytesReadTotal != totalBytes) {
+                    if (totalBytesRead != totalBytes) {
                         Files.deleteIfExists(outputFile.toPath());
-                        updateProgress(0.0, 1.0);
-                        updateMessage("Lỗi: Ngắt kết nối giữa chừng khi đang tải " + fileName);
+                        throw new EOFException("Dữ liệu nhận chưa hoàn chỉnh");
+                    }
+
+                    String actualSha256 = HashUtil.toHexString(digest.digest());
+                    if (!expectedSha256.isBlank() && !expectedSha256.equalsIgnoreCase(actualSha256)) {
+                        Files.deleteIfExists(outputFile.toPath());
+                        updateMessage("Cảnh báo: File bị hỏng (Sai lệch SHA-256)!");
                         return false;
                     }
 
-                    String calculatedSha256 = HashUtil.toHexString(sha256Digest.digest());
-                    if (calculatedSha256.equalsIgnoreCase(expectedSha256)) {
-                        updateProgress(1.0, 1.0);
-                        updateMessage("Tải hoàn tất! SHA-256 hợp lệ: [" + HashUtil.shortHash(calculatedSha256) + "]");
-                        return true;
-                    } else {
-                        Files.deleteIfExists(outputFile.toPath());
-                        updateProgress(0.0, 1.0);
-                        updateMessage("Cảnh báo: File bị hỏng trong quá trình truyền (Sai lệch SHA-256)!");
-                        return false;
-                    }
+                    updateProgress(1.0, 1.0);
+                    updateMessage("Tải hoàn tất! SHA-256: [" + HashUtil.shortHash(actualSha256) + "]");
+                    return true;
                 }
             }
-        } catch (EOFException e) {
-            cleanupCorruptedFile(outputFile);
-            updateProgress(0.0, 1.0);
-            updateMessage("Lỗi: Peer ngắt kết nối đột ngột khi đang tải " + fileName);
-            return false;
-        } catch (IOException e) {
-            cleanupCorruptedFile(outputFile);
-            updateProgress(0.0, 1.0);
-            updateMessage("Lỗi tải tệp " + fileName + ": " + e.getMessage());
-            LOG.log(Level.WARNING, "Lỗi I/O khi tải tệp " + fileName, e);
-            return false;
-        }
-    }
-
-    private static void cleanupCorruptedFile(File file) {
-        if (file != null && file.exists()) {
-            try {
-                Files.deleteIfExists(file.toPath());
-            } catch (IOException ignored) {
+        } catch (Exception e) {
+            if (outputFile != null && outputFile.exists()) {
+                try {
+                    Files.deleteIfExists(outputFile.toPath());
+                } catch (IOException ignored) {
+                }
             }
+            updateMessage("Trạng thái: Lỗi tải tệp - " + e.getMessage());
+            return false;
         }
     }
 }

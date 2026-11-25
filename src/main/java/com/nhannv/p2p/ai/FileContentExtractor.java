@@ -7,8 +7,11 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Locale;
 import java.util.Set;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -20,14 +23,15 @@ import java.util.zip.ZipInputStream;
  * <h2>Đặc điểm Kỹ thuật</h2>
  * <ul>
  *   <li><b>Zero-OOM (Không bao giờ đọc toàn bộ tệp):</b> Chỉ đọc tối đa 4 KB đầu tiên của tệp văn bản/mã nguồn.</li>
- *   <li><b>Đọc trực tiếp cấu trúc {@code .docx}, {@code .pptx} và {@code .zip} bằng {@link ZipInputStream}:</b>
- *       Không cần thư viện Apache POI cồng kềnh, vẫn trích xuất được văn bản trong {@code word/document.xml}
- *       hoặc danh sách tệp con bên trong gói {@code .zip}.</li>
+ *   <li><b>Bảo toàn ranh giới UTF-8 (A2):</b> Tự động lùi về ranh giới ký tự hợp lệ trước khi giải mã String.</li>
+ *   <li><b>Đọc OpenXML chính xác (A3):</b> Chỉ so khớp đúng entry mục tiêu (vd: {@code word/document.xml}).</li>
  *   <li><b>Sensitive Data Guard:</b> Phát hiện nhanh khóa bí mật ({@code PRIVATE KEY}), token GitHub/OpenAI/Google
- *       hoặc chuỗi mật khẩu trước khi tệp được chia sẻ công khai trong mạng LAN.</li>
+ *       hoặc chuỗi mật khẩu trước khi gửi tới AI hoặc phát tán qua mạng.</li>
  * </ul>
  */
 public final class FileContentExtractor {
+
+    private static final Logger LOG = Logger.getLogger(FileContentExtractor.class.getName());
 
     /** Kích thước trích xuất tối đa cho Auto-Tagging = 4 KB. */
     public static final int MAX_SNIPPET_BYTES = 4 * 1024;
@@ -71,24 +75,24 @@ public final class FileContentExtractor {
                 }
             }
             if (TEXT_EXTENSIONS.contains(ext)) {
-                byte[] buffer = new byte[(int) Math.min(file.length(), MAX_SNIPPET_BYTES)];
                 try (InputStream fis = new BufferedInputStream(new FileInputStream(file))) {
-                    int read = fis.read(buffer);
-                    if (read > 0) {
-                        return cleanReadableText(new String(buffer, 0, read, StandardCharsets.UTF_8), 1_800);
+                    byte[] buffer = fis.readNBytes(MAX_SNIPPET_BYTES);
+                    if (buffer.length > 0) {
+                        return cleanReadableText(safeDecodeUtf8(buffer, buffer.length), 1_800);
                     }
                 }
+                return ""; // [A1 Fix]: File text rỗng hoặc đọc xong thì return luôn, không rơi xuống nhánh nhị phân
             }
 
-            // Với PDF hoặc file nhị phân: đọc 4 KB đầu và lọc các chuỗi ASCII có nghĩa
-            byte[] buffer = new byte[(int) Math.min(file.length(), MAX_SNIPPET_BYTES)];
+            // Với PDF hoặc file nhị phân: đọc 4 KB đầu và trích lọc các chuỗi ASCII có nghĩa
             try (InputStream fis = new BufferedInputStream(new FileInputStream(file))) {
-                int read = fis.read(buffer);
-                if (read > 0) {
-                    return extractPrintableAsciiRuns(buffer, read, 900);
+                byte[] buffer = fis.readNBytes(MAX_SNIPPET_BYTES);
+                if (buffer.length > 0) {
+                    return extractPrintableAsciiRuns(buffer, buffer.length, 900);
                 }
             }
-        } catch (IOException ignored) {
+        } catch (IOException e) {
+            LOG.log(Level.FINE, "Lỗi khi trích xuất snippet từ file: " + file.getName(), e);
         }
         return "";
     }
@@ -111,10 +115,47 @@ public final class FileContentExtractor {
         }
 
         if (TEXT_EXTENSIONS.contains(ext)) {
-            return cleanReadableText(new String(rawBytes, 0, safeLen, StandardCharsets.UTF_8), 2_200);
+            return cleanReadableText(safeDecodeUtf8(rawBytes, safeLen), 2_200);
         }
 
         return extractPrintableAsciiRuns(rawBytes, safeLen, 1_200);
+    }
+
+    /**
+     * [A2 Fix]: Giải mã chuỗi UTF-8 an toàn bằng cách lùi về ranh giới byte hợp lệ,
+     * tránh bị chẻ đôi ký tự đa byte ở cuối buffer 4096 bytes.
+     */
+    public static String safeDecodeUtf8(byte[] bytes, int length) {
+        if (bytes == null || length <= 0) {
+            return "";
+        }
+        int len = Math.min(bytes.length, length);
+        // Lùi lại nếu byte cuối cùng là byte tiếp nối (continuation byte: 10xxxxxx) hoặc byte mở đầu chưa đủ byte
+        int i = len - 1;
+        int continuationCount = 0;
+        while (i >= 0 && (bytes[i] & 0xC0) == 0x80 && continuationCount < 4) {
+            continuationCount++;
+            i--;
+        }
+
+        if (i >= 0) {
+            int lead = bytes[i] & 0xFF;
+            int expectedLength = 1;
+            if ((lead & 0xE0) == 0xC0) {
+                expectedLength = 2;
+            } else if ((lead & 0xF0) == 0xE0) {
+                expectedLength = 3;
+            } else if ((lead & 0xF8) == 0xF0) {
+                expectedLength = 4;
+            }
+
+            if (continuationCount + 1 < expectedLength) {
+                // Ký tự cuối cùng bị cắt cụt -> lùi bỏ ký tự này
+                len = i;
+            }
+        }
+
+        return new String(bytes, 0, Math.max(0, len), StandardCharsets.UTF_8);
     }
 
     /**
@@ -154,13 +195,15 @@ public final class FileContentExtractor {
         return fileName.substring(dot + 1).toLowerCase(Locale.ROOT).trim();
     }
 
+    /**
+     * [A3 Fix]: Chỉ so khớp đúng entry mục tiêu (ví dụ "word/document.xml"), không dùng OR chung chung.
+     */
     private static String extractOpenXmlText(File officeFile, String targetEntryPrefix) {
         try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(new FileInputStream(officeFile)))) {
             ZipEntry entry;
             while ((entry = zis.getNextEntry()) != null) {
-                if (entry.getName().equalsIgnoreCase(targetEntryPrefix)
-                        || entry.getName().startsWith("word/document")
-                        || entry.getName().startsWith("ppt/slides/slide")) {
+                String entryName = entry.getName();
+                if (entryName.equalsIgnoreCase(targetEntryPrefix)) {
                     byte[] xmlBytes = zis.readNBytes(16 * 1024);
                     String rawXml = new String(xmlBytes, StandardCharsets.UTF_8);
                     // Thay các thẻ kết thúc đoạn bằng khoảng trắng rồi xóa toàn bộ thẻ XML
@@ -170,7 +213,8 @@ public final class FileContentExtractor {
                     return cleanReadableText(stripped, 1_600);
                 }
             }
-        } catch (IOException ignored) {
+        } catch (IOException e) {
+            LOG.log(Level.FINE, "Lỗi đọc OpenXML cho: " + officeFile.getName(), e);
         }
         return "";
     }
@@ -189,7 +233,8 @@ public final class FileContentExtractor {
                     count++;
                 }
             }
-        } catch (IOException ignored) {
+        } catch (IOException e) {
+            LOG.log(Level.FINE, "Lỗi đọc Zip directory listing", e);
         }
         if (count == 0) {
             return "";

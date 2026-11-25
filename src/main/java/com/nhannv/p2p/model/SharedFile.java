@@ -221,19 +221,32 @@ public record SharedFile(
      * Đóng gói thông tin tệp thành 1 dòng văn bản phân tách bởi ký tự {@code '|'}
      * để truyền qua mạng khi phản hồi lệnh {@code LIST_FILES} (8 trường, tương thích ngược với 5 trường).
      * <pre>fileName|fileSize|sha256Hash|ownerIp|ownerName|aiTags|aiSummary|sensitiveWarning</pre>
+     * <p>
+     * <b>Chốt chặn Bảo mật (S3):</b> Nếu tệp có cảnh báo dữ liệu nhạy cảm (sensitiveWarning),
+     * các thẻ tags và tóm tắt AI sẽ KHÔNG được phát tán công khai trên mạng LAN.
      */
     public String toWireLine() {
         String safeName = fileName.replace('|', '_');
         String safeOwner = ownerName.replace('|', '_');
+        String wireTags = hasSensitiveWarning() ? "" : aiTags;
+        String wireSummary = hasSensitiveWarning() ? "" : aiSummary;
         return String.join(WIRE_SEPARATOR,
                 safeName,
                 Long.toString(fileSize),
                 sha256Hash,
                 ownerIp,
                 safeOwner,
-                aiTags,
-                aiSummary,
+                wireTags,
+                wireSummary,
                 sensitiveWarning);
+    }
+
+    public String name() {
+        return fileName;
+    }
+
+    public long size() {
+        return fileSize;
     }
 
     /**

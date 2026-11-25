@@ -504,7 +504,12 @@ public final class DiscoveryService implements AutoCloseable {
 
         String type = parts[2];
         String senderId = parts[3];
-        String hostName = parts[4].isBlank() ? "Unknown" : parts[4].trim();
+        String rawHost = parts[4].isBlank() ? "Unknown" : parts[4].trim();
+        // [S9 Fix]: Khử ký tự điều khiển và giới hạn độ dài tên máy nhận từ mạng để chống spoofing
+        String hostName = rawHost.replaceAll("[\\r\\n\\t|]", "").trim();
+        if (hostName.length() > 64) {
+            hostName = hostName.substring(0, 64);
+        }
 
         if (instanceId.equals(senderId)) {
             return; // Bỏ qua gói tin do chính máy mình phát ra.
